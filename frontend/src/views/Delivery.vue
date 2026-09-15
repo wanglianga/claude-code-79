@@ -20,6 +20,15 @@
               <el-tag v-if="t.is_timeout" type="danger" size="small">超时</el-tag>
             </div>
           </div>
+          <!-- 未开门风险与重点关注提示：提前告知配送员 -->
+          <div v-if="t.focus || t.risk_level !== 'normal' || t.no_answer_count > 0 || t.delivery_confirm_mode === 'phone_first'"
+            class="risk-bar">
+            <el-tag v-if="t.focus" type="danger" effect="dark" size="small">⭐ 次日重点关注</el-tag>
+            <el-tag v-if="t.risk_level === 'high'" type="danger" effect="dark" size="small">高风险老人</el-tag>
+            <el-tag v-else-if="t.risk_level === 'attention'" type="warning" size="small">关注老人</el-tag>
+            <el-tag v-if="t.no_answer_count > 0" type="warning" size="small">曾未开门×{{ t.no_answer_count }}</el-tag>
+            <el-tag v-if="t.delivery_confirm_mode === 'phone_first'" type="primary" size="small">📞 先电话确认再上门</el-tag>
+          </div>
           <el-descriptions :column="1" border size="small" class="mt-12">
             <el-descriptions-item label="老人">{{ t.elder_name }}（{{ t.phone || '无电话' }}）</el-descriptions-item>
             <el-descriptions-item label="地址">{{ t.address }}</el-descriptions-item>
@@ -96,9 +105,9 @@
     </el-dialog>
 
     <!-- 异常上报 -->
-    <el-dialog v-model="failVisible" title="配送异常上报" width="440px">
+    <el-dialog v-model="failVisible" title="配送异常上报" width="480px">
       <el-alert type="warning" :closable="false" show-icon class="mb-12"
-        title="上报后将生成异常工单并立即通知社区回访；涉及老人安全请同时电话联系社区" />
+        title="上报后将生成异常工单并立即通知社区与家属；涉及老人安全请同时电话联系社区" />
       <el-form label-width="90px">
         <el-form-item label="异常类型" required>
           <el-select v-model="failForm.type">
@@ -106,6 +115,18 @@
             <el-option label="其他异常" value="other" />
           </el-select>
         </el-form-item>
+        <template v-if="failForm.type === 'no_answer'">
+          <el-form-item label="联系尝试" required>
+            <div class="attempt-grid">
+              <el-checkbox v-model="failForm.knock_done">已敲门</el-checkbox>
+              <el-checkbox v-model="failForm.phone_done">已电话联系老人</el-checkbox>
+              <el-checkbox v-model="failForm.neighbor_done">已询问邻里</el-checkbox>
+              <el-checkbox v-model="failForm.family_done">已联系家属</el-checkbox>
+            </div>
+          </el-form-item>
+          <el-alert type="error" :closable="false" show-icon class="mb-12"
+            title="未开门上报必须先完成「敲门」与「电话联系」两项" />
+        </template>
         <el-form-item label="情况说明">
           <el-input v-model="failForm.note" type="textarea" placeholder="如：敲门 5 分钟无人应答，电话未接通" />
         </el-form-item>
@@ -136,7 +157,7 @@ const deliverVisible = ref(false)
 const failVisible = ref(false)
 const pickupForm = reactive({ thermal_box_no: '', route_info: '' })
 const deliverForm = reactive({ sign_photo_url: '', sign_type: 'elder', signed_by_name: '', knock_confirmed: false })
-const failForm = reactive({ type: 'no_answer', note: '' })
+const failForm = reactive({ type: 'no_answer', note: '', knock_done: false, phone_done: false, neighbor_done: false, family_done: false })
 
 async function load() {
   tasks.value = await api.get('/delivery/tasks')
@@ -207,16 +228,21 @@ async function doDeliver() {
 
 function openFail(t) {
   current.value = t
-  failForm.type = 'no_answer'
-  failForm.note = ''
+  Object.assign(failForm, { type: 'no_answer', note: '', knock_done: false, phone_done: false, neighbor_done: false, family_done: false })
   failVisible.value = true
 }
 
 async function doFail() {
+  if (failForm.type === 'no_answer' && (!failForm.knock_done || !failForm.phone_done)) {
+    ElMessage.warning('未开门上报必须先完成「敲门」与「电话联系」')
+    return
+  }
   acting.value = true
   try {
-    await api.post(`/delivery/${current.value.id}/fail`, failForm)
-    ElMessage.warning('异常已上报，社区将跟进回访')
+    const res = await api.post(`/delivery/${current.value.id}/fail`, failForm)
+    ElMessage.warning(res.no_answer_count >= 2
+      ? `异常已上报；该老人已连续 ${res.no_answer_count} 次未开门，社区将发起上门查看`
+      : '异常已上报，社区将跟进回访')
     failVisible.value = false
     await load()
   } finally {
@@ -226,3 +252,12 @@ async function doFail() {
 
 onMounted(load)
 </script>
+
+<style scoped>
+.risk-bar {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-top: 8px; padding: 8px 10px;
+  background: #fdf0e2; border: 1px solid #f5d9b8; border-radius: 8px;
+}
+.attempt-grid { display: grid; grid-template-columns: 1fr 1fr; }
+</style>

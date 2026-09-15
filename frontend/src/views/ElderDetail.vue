@@ -29,6 +29,19 @@
             <el-tag v-if="e.mobility_impaired" type="danger" size="small" style="margin-left:4px">行动不便</el-tag>
             <span v-if="!e.cognitive_impairment && !e.living_alone && !e.mobility_impaired">无</span>
           </el-descriptions-item>
+          <el-descriptions-item label="风险标签">
+            <el-tag :type="e.risk_level === 'high' ? 'danger' : e.risk_level === 'attention' ? 'warning' : 'success'"
+              :effect="e.risk_level === 'normal' ? 'plain' : 'dark'">
+              {{ { normal: '正常', attention: '关注', high: '高风险' }[e.risk_level] }}
+            </el-tag>
+            <el-tag v-if="e.focus_until" type="danger" size="small" effect="dark" style="margin-left:4px">
+              重点关注至 {{ e.focus_until }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="配送方式">
+            {{ e.delivery_confirm_mode === 'phone_first' ? '电话确认后再上门' : '直接上门' }}
+            <span v-if="e.no_answer_count > 0" class="danger-text">（连续未开门 {{ e.no_answer_count }} 次）</span>
+          </el-descriptions-item>
           <el-descriptions-item label="社区备注">{{ e.community_note || '—' }}</el-descriptions-item>
         </el-descriptions>
       </div>

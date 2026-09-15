@@ -108,12 +108,16 @@ func elderRowToMap(row interface{ Scan(...interface{}) error }) (gin.H, error) {
 			SubsidyPerMeal                                      float64
 			NeedKnock, Cog, Alone, Mob, Active                  bool
 			BirthDate                                           sql.NullTime
+			RiskLevel, DeliveryConfirmMode                      string
+			NoAnswerCount                                       int
 		}
 	)
 	var userID, familyID sql.NullInt64
+	var focusUntil sql.NullString
 	err := row.Scan(&e.ID, &userID, &e.Name, &e.IDCard, &e.Gender, &e.BirthDate, &e.Phone, &e.Address,
 		&e.SubsidyLevel, &e.SubsidyPerMeal, &e.Dietary, &e.NeedKnock, &e.BoxReturnMethod,
-		&e.EmergName, &e.EmergPhone, &e.Cog, &e.Alone, &e.Mob, &familyID, &e.CommunityNote, &e.Active)
+		&e.EmergName, &e.EmergPhone, &e.Cog, &e.Alone, &e.Mob, &familyID, &e.CommunityNote, &e.Active,
+		&e.RiskLevel, &e.DeliveryConfirmMode, &e.NoAnswerCount, &focusUntil)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +134,8 @@ func elderRowToMap(row interface{ Scan(...interface{}) error }) (gin.H, error) {
 		"cognitive_impairment": e.Cog, "living_alone": e.Alone, "mobility_impaired": e.Mob,
 		"community_note": e.CommunityNote, "active": e.Active,
 		"strict_mode": e.Cog || e.Alone || e.Mob,
+		"risk_level": e.RiskLevel, "delivery_confirm_mode": e.DeliveryConfirmMode,
+		"no_answer_count": e.NoAnswerCount, "focus_until": focusUntil.String,
 	}
 	if userID.Valid {
 		m["user_id"] = userID.Int64
@@ -142,7 +148,8 @@ func elderRowToMap(row interface{ Scan(...interface{}) error }) (gin.H, error) {
 
 const elderCols = `id, user_id, name, id_card, gender, birth_date, phone, address, subsidy_level, subsidy_per_meal,
 	dietary_restrictions, need_knock_confirm, box_return_method, emergency_contact_name, emergency_contact_phone,
-	cognitive_impairment, living_alone, mobility_impaired, family_user_id, community_note, active`
+	cognitive_impairment, living_alone, mobility_impaired, family_user_id, community_note, active,
+	risk_level, delivery_confirm_mode, no_answer_count, focus_until::text`
 
 func (s *Server) listElders(c *gin.Context) {
 	q := strings.TrimSpace(c.Query("q"))
@@ -237,6 +244,7 @@ type elderReq struct {
 	CognitiveImpairment  bool    `json:"cognitive_impairment"`
 	LivingAlone          bool    `json:"living_alone"`
 	MobilityImpaired     bool    `json:"mobility_impaired"`
+	DeliveryConfirmMode  string  `json:"delivery_confirm_mode"`
 	FamilyUserID         *int    `json:"family_user_id"`
 	CommunityNote        string  `json:"community_note"`
 }
@@ -251,6 +259,9 @@ func (r *elderReq) normalize() {
 	if r.BoxReturnMethod == "" {
 		r.BoxReturnMethod = "next_delivery"
 	}
+	if r.DeliveryConfirmMode == "" {
+		r.DeliveryConfirmMode = "direct"
+	}
 }
 
 func (s *Server) createElder(c *gin.Context) {
@@ -263,11 +274,11 @@ func (s *Server) createElder(c *gin.Context) {
 	var id int
 	err := s.db.QueryRow(`INSERT INTO elders(name, id_card, gender, birth_date, phone, address, subsidy_level, subsidy_per_meal,
 		dietary_restrictions, need_knock_confirm, box_return_method, emergency_contact_name, emergency_contact_phone,
-		cognitive_impairment, living_alone, mobility_impaired, family_user_id, community_note)
-		VALUES($1,$2,$3,NULLIF($4,'')::date,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
+		cognitive_impairment, living_alone, mobility_impaired, family_user_id, community_note, delivery_confirm_mode)
+		VALUES($1,$2,$3,NULLIF($4,'')::date,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id`,
 		req.Name, req.IDCard, req.Gender, req.BirthDate, req.Phone, req.Address, req.SubsidyLevel, req.SubsidyPerMeal,
 		req.DietaryRestrictions, req.NeedKnockConfirm, req.BoxReturnMethod, req.EmergencyContactName, req.EmergencyContactPhone,
-		req.CognitiveImpairment, req.LivingAlone, req.MobilityImpaired, req.FamilyUserID, req.CommunityNote).Scan(&id)
+		req.CognitiveImpairment, req.LivingAlone, req.MobilityImpaired, req.FamilyUserID, req.CommunityNote, req.DeliveryConfirmMode).Scan(&id)
 	if err != nil {
 		fail(c, http.StatusBadRequest, "建档失败：身份证号可能已存在")
 		return
@@ -285,11 +296,11 @@ func (s *Server) updateElder(c *gin.Context) {
 	req.normalize()
 	_, err := s.db.Exec(`UPDATE elders SET name=$1, id_card=$2, gender=$3, birth_date=NULLIF($4,'')::date, phone=$5, address=$6,
 		dietary_restrictions=$7, need_knock_confirm=$8, box_return_method=$9, emergency_contact_name=$10, emergency_contact_phone=$11,
-		cognitive_impairment=$12, living_alone=$13, mobility_impaired=$14, family_user_id=$15, community_note=$16
-		WHERE id=$17`,
+		cognitive_impairment=$12, living_alone=$13, mobility_impaired=$14, family_user_id=$15, community_note=$16, delivery_confirm_mode=$17
+		WHERE id=$18`,
 		req.Name, req.IDCard, req.Gender, req.BirthDate, req.Phone, req.Address,
 		req.DietaryRestrictions, req.NeedKnockConfirm, req.BoxReturnMethod, req.EmergencyContactName, req.EmergencyContactPhone,
-		req.CognitiveImpairment, req.LivingAlone, req.MobilityImpaired, req.FamilyUserID, req.CommunityNote, id)
+		req.CognitiveImpairment, req.LivingAlone, req.MobilityImpaired, req.FamilyUserID, req.CommunityNote, req.DeliveryConfirmMode, id)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "更新档案失败")
 		return

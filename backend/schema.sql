@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS elders (
     cognitive_impairment    BOOLEAN NOT NULL DEFAULT FALSE,    -- 认知障碍
     living_alone            BOOLEAN NOT NULL DEFAULT FALSE,    -- 独居
     mobility_impaired       BOOLEAN NOT NULL DEFAULT FALSE,    -- 行动不便
+    risk_level              TEXT NOT NULL DEFAULT 'normal' CHECK (risk_level IN ('normal','attention','high')), -- 风险标签：正常/关注/高风险
+    delivery_confirm_mode   TEXT NOT NULL DEFAULT 'direct' CHECK (delivery_confirm_mode IN ('direct','phone_first')), -- 配送方式：直接上门/电话确认后再上门
+    no_answer_count         INT NOT NULL DEFAULT 0,            -- 连续未开门次数（成功送达或回访后清零）
+    focus_until             DATE,                              -- 重点关注截止日（次日重点关注）
     family_user_id          INT REFERENCES users(id),          -- 绑定家属账号
     community_note          TEXT NOT NULL DEFAULT '',
     active                  BOOLEAN NOT NULL DEFAULT TRUE,
@@ -259,6 +263,28 @@ CREATE TABLE IF NOT EXISTS notifications (
     content    TEXT NOT NULL DEFAULT '',
     read       BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 已有库的幂等补充（CREATE TABLE IF NOT EXISTS 不会更新旧表结构）
+ALTER TABLE elders ADD COLUMN IF NOT EXISTS risk_level TEXT NOT NULL DEFAULT 'normal';
+ALTER TABLE elders ADD COLUMN IF NOT EXISTS delivery_confirm_mode TEXT NOT NULL DEFAULT 'direct';
+ALTER TABLE elders ADD COLUMN IF NOT EXISTS no_answer_count INT NOT NULL DEFAULT 0;
+ALTER TABLE elders ADD COLUMN IF NOT EXISTS focus_until DATE;
+ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS home_visit BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- 未开门联系尝试记录：敲门、电话、邻里询问、家属联系
+CREATE TABLE IF NOT EXISTS contact_attempts (
+    id           SERIAL PRIMARY KEY,
+    delivery_id  INT NOT NULL REFERENCES deliveries(id),
+    order_id     INT NOT NULL REFERENCES orders(id),
+    elder_id     INT NOT NULL REFERENCES elders(id),
+    knock_done   BOOLEAN NOT NULL DEFAULT FALSE,  -- 敲门
+    phone_done   BOOLEAN NOT NULL DEFAULT FALSE,  -- 电话联系
+    neighbor_done BOOLEAN NOT NULL DEFAULT FALSE, -- 邻里询问
+    family_done  BOOLEAN NOT NULL DEFAULT FALSE,  -- 家属联系
+    note         TEXT NOT NULL DEFAULT '',
+    reported_by  INT REFERENCES users(id),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- 状态流转时间线（同一餐单各方看到一致状态）

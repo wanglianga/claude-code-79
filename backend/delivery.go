@@ -18,13 +18,15 @@ func (s *Server) deliveryTasks(c *gin.Context) {
 	rows, err := s.db.Query(`SELECT d.id, d.order_id, o.order_no, e.name, o.address, e.phone,
 		e.emergency_contact_name, e.emergency_contact_phone, o.need_knock_confirm, o.strict_mode,
 		d.status, d.thermal_box_no, d.route_info, d.pickup_time::text, d.delivered_time::text,
-		d.sign_photo_url, d.signed_by_name, d.knock_confirmed, d.is_timeout, d.deliverer_id, o.meal_date::text, o.meal_type
+		d.sign_photo_url, d.signed_by_name, d.knock_confirmed, d.is_timeout, d.deliverer_id, o.meal_date::text, o.meal_type,
+		e.risk_level, e.delivery_confirm_mode, e.no_answer_count, (e.focus_until >= CURRENT_DATE)
 		FROM deliveries d
 		JOIN orders o ON o.id=d.order_id
 		JOIN elders e ON e.id=o.elder_id
 		WHERE d.deliverer_type=$1 AND (d.deliverer_id IS NULL OR d.deliverer_id=$2)
 		  AND o.status IN ('ready','delivering','signed','completed','exception','settled')
-		ORDER BY CASE d.status WHEN 'assigned' THEN 0 WHEN 'picked' THEN 1 ELSE 2 END, d.id DESC LIMIT 100`,
+		ORDER BY (e.focus_until >= CURRENT_DATE) DESC NULLS LAST, (e.risk_level='high') DESC,
+		  CASE d.status WHEN 'assigned' THEN 0 WHEN 'picked' THEN 1 ELSE 2 END, d.id DESC LIMIT 100`,
 		dtype, uid)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "查询配送任务失败")
@@ -41,10 +43,14 @@ func (s *Server) deliveryTasks(c *gin.Context) {
 			pickup, delivered                                      sql.NullString
 			delivererID                                            *int
 			mealDate, mealType                                     string
+			riskLevel, confirmMode                                 string
+			noAnswerCount                                          int
+			focus                                                  bool
 		)
 		rows.Scan(&did, &oid, &no, &elderName, &addr, &phone, &emergName, &emergPhone,
 			&needKnock, &strict, &status, &box, &route, &pickup, &delivered, &photo, &signedBy,
-			&knock, &timeout, &delivererID, &mealDate, &mealType)
+			&knock, &timeout, &delivererID, &mealDate, &mealType,
+			&riskLevel, &confirmMode, &noAnswerCount, &focus)
 		mine := delivererID != nil && *delivererID == uid
 		list = append(list, gin.H{
 			"id": did, "order_id": oid, "order_no": no, "elder_name": elderName, "address": addr,
@@ -53,6 +59,8 @@ func (s *Server) deliveryTasks(c *gin.Context) {
 			"thermal_box_no": box, "route_info": route, "pickup_time": pickup.String, "delivered_time": delivered.String,
 			"sign_photo_url": photo, "signed_by_name": signedBy, "knock_confirmed": knock,
 			"is_timeout": timeout, "mine": mine, "meal_date": mealDate[:10], "meal_type": mealType,
+			"risk_level": riskLevel, "delivery_confirm_mode": confirmMode,
+			"no_answer_count": noAnswerCount, "focus": focus,
 		})
 	}
 	ok(c, list)
@@ -244,6 +252,11 @@ func (s *Server) completeDelivery(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "更新餐单状态失败")
 		return
 	}
+	// 成功送达：连续未开门计数清零
+	if _, err := tx.Exec(`UPDATE elders SET no_answer_count=0 WHERE id=$1`, elderID); err != nil {
+		fail(c, http.StatusInternalServerError, "更新老人风险计数失败")
+		return
+	}
 	// 餐盒台账：现场回收方式立即视为回收
 	returned := 0
 	boxStatus := "pending"
@@ -275,12 +288,17 @@ func (s *Server) completeDelivery(c *gin.Context) {
 	ok(c, gin.H{"delivered": true, "is_timeout": isTimeout})
 }
 
-// 配送失败（老人未开门等）：生成异常并触发社区回访
+// 配送失败（老人未开门等）：未开门须记录敲门/电话/邻里询问/家属联系，生成异常并触发社区回访，
+// 连续未开门计数 +1（超阈值后社区可发起上门查看），事件同步家属与社区网格员
 func (s *Server) failDelivery(c *gin.Context) {
 	id := c.Param("id")
 	var req struct {
-		Type string `json:"type" binding:"required"` // no_answer / other
-		Note string `json:"note"`
+		Type         string `json:"type" binding:"required"` // no_answer / other
+		Note         string `json:"note"`
+		KnockDone    bool   `json:"knock_done"`    // 敲门
+		PhoneDone    bool   `json:"phone_done"`    // 电话联系
+		NeighborDone bool   `json:"neighbor_done"` // 邻里询问
+		FamilyDone   bool   `json:"family_done"`   // 家属联系
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, http.StatusBadRequest, "请选择异常类型")
@@ -323,6 +341,11 @@ func (s *Server) failDelivery(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "当前状态无法上报异常")
 		return
 	}
+	// 平台要求：未开门上报必须先完成敲门与电话联系（邻里/家属联系如实记录）
+	if req.Type == "no_answer" && (!req.KnockDone || !req.PhoneDone) {
+		fail(c, http.StatusBadRequest, "未开门上报必须先完成敲门并电话联系老人，请确认后提交")
+		return
+	}
 	// 上报异常同时绑定当前配送员（未认领任务）
 	if _, err := tx.Exec(`UPDATE deliveries SET status='failed', anomaly_note=$1, deliverer_id=$2 WHERE id=$3`, req.Note, uid, id); err != nil {
 		fail(c, http.StatusInternalServerError, "上报失败")
@@ -332,18 +355,48 @@ func (s *Server) failDelivery(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "更新餐单状态失败")
 		return
 	}
+	// 未开门：记录联系尝试并累计连续未开门次数
+	noAnswerCount := 0
+	if req.Type == "no_answer" {
+		if _, err := tx.Exec(`INSERT INTO contact_attempts(delivery_id, order_id, elder_id, knock_done, phone_done, neighbor_done, family_done, note, reported_by)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			id, orderID, elderID, req.KnockDone, req.PhoneDone, req.NeighborDone, req.FamilyDone, req.Note, uid); err != nil {
+			fail(c, http.StatusInternalServerError, "记录联系尝试失败")
+			return
+		}
+		if err := tx.QueryRow(`UPDATE elders SET no_answer_count=no_answer_count+1 WHERE id=$1 RETURNING no_answer_count`, elderID).
+			Scan(&noAnswerCount); err != nil {
+			fail(c, http.StatusInternalServerError, "更新未开门计数失败")
+			return
+		}
+	}
 	desc := "餐单 " + orderNo + " 配送异常：" + anomalyTypeName(req.Type) + "。" + req.Note
+	if req.Type == "no_answer" {
+		desc += "（已敲门✓、已电话✓"
+		if req.NeighborDone {
+			desc += "、已询问邻里✓"
+		}
+		if req.FamilyDone {
+			desc += "、已联系家属✓"
+		}
+		desc += "；连续未开门 " + itoa(noAnswerCount) + " 次）"
+	}
 	if strict {
 		desc += "（该老人为重点关注对象：认知障碍/独居/行动不便，请立即回访确认安全）"
 	}
 	anID, _ := createAnomaly(tx, orderID, elderID, req.Type, desc, uid)
 	addOrderEvent(tx, orderID, uid, c.GetString("name"), "配送异常上报", anomalyTypeName(req.Type)+"。"+req.Note)
+	// 同步家属与社区网格员
 	notify(tx, 0, "community", orderID, "配送异常："+anomalyTypeName(req.Type),
 		"老人「"+elderName+"」"+orderNo+" 配送异常，请尽快回访（工单 #"+itoa(anID)+"）")
 	notifyElderParties(tx, elderID, orderID, "配送异常提醒", orderNo+" 配送异常，社区将跟进处理")
+	if req.Type == "no_answer" && noAnswerCount >= 2 {
+		notify(tx, 0, "community", orderID, "未开门超阈值预警",
+			"老人「"+elderName+"」已连续 "+itoa(noAnswerCount)+" 次未开门，可发起上门查看")
+	}
 	if err := tx.Commit(); err != nil {
 		fail(c, http.StatusInternalServerError, "提交失败")
 		return
 	}
-	ok(c, gin.H{"reported": true, "anomaly_id": anID})
+	ok(c, gin.H{"reported": true, "anomaly_id": anID, "no_answer_count": noAnswerCount})
 }

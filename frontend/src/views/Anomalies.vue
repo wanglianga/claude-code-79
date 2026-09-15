@@ -19,9 +19,10 @@
       <el-table-column prop="id" label="工单" width="70">
         <template #default="{ row }">#{{ row.id }}</template>
       </el-table-column>
-      <el-table-column label="类型" width="130">
+      <el-table-column label="类型" width="150">
         <template #default="{ row }">
           <el-tag :type="row.priority === 'high' ? 'danger' : 'info'" effect="plain">{{ row.type_name }}</el-tag>
+          <el-tag v-if="row.home_visit" type="danger" size="small" effect="dark" style="margin-left:2px">已发起上门</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="elder_name" label="老人" width="90" />
@@ -42,13 +43,25 @@
       <el-table-column label="回访" width="70">
         <template #default="{ row }">{{ row.follow_up_count }} 次</template>
       </el-table-column>
+      <el-table-column label="连续未开门" width="90">
+        <template #default="{ row }">
+          <span v-if="row.type === 'no_answer'" :class="{ 'danger-text': row.no_answer_count >= 2 }">
+            {{ row.no_answer_count }} 次
+          </span>
+          <span v-else class="muted">—</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="160">
         <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="180" fixed="right">
+      <el-table-column label="操作" width="230" fixed="right">
         <template #default="{ row }">
           <template v-if="row.status !== 'resolved' && canHandle">
             <el-button size="small" type="warning" @click="openFollowUp(row)">回访</el-button>
+            <el-button v-if="row.type === 'no_answer' && !row.home_visit" size="small" type="danger"
+              :disabled="row.no_answer_count < 2"
+              :title="row.no_answer_count < 2 ? '连续未开门未达阈值（≥2 次）' : '发起上门查看'"
+              @click="homeVisit(row)">上门查看</el-button>
             <el-button size="small" type="success" @click="openResolve(row)">办结</el-button>
           </template>
           <el-tooltip v-if="row.resolution" :content="row.resolution">
@@ -77,9 +90,17 @@
         <el-form-item label="回访结果" required>
           <el-input v-model="followUpForm.result" type="textarea" placeholder="记录回访了解到的情况" />
         </el-form-item>
+        <el-form-item label="后续配送方式">
+          <el-select v-model="followUpForm.delivery_confirm_mode" clearable placeholder="不调整" style="width:100%">
+            <el-option label="直接上门（默认）" value="direct" />
+            <el-option label="电话确认后再上门" value="phone_first" />
+          </el-select>
+        </el-form-item>
       </el-form>
       <el-alert v-if="followUpForm.elder_status === 'urgent'" type="error" :closable="false" show-icon
         title="紧急状态将立即通知社区负责人与家属" />
+      <el-alert v-else-if="followUpForm.elder_status === 'need_help'" type="warning" :closable="false" show-icon
+        title="将老人风险标签调整为「关注」并生成次日重点关注，骑手端提前可见" />
       <template #footer>
         <el-button @click="followUpVisible = false">取消</el-button>
         <el-button type="primary" :loading="acting" @click="doFollowUp">提交回访</el-button>
@@ -115,7 +136,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { Search } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
 import { store } from '../store'
 import { anomalyTypes, anomalyStatus, fmtTime } from '../utils'
@@ -127,7 +148,7 @@ const filters = reactive({ status: '', type: '' })
 const current = ref(null)
 const followUpVisible = ref(false)
 const resolveVisible = ref(false)
-const followUpForm = reactive({ type: 'phone', elder_status: 'fine', result: '' })
+const followUpForm = reactive({ type: 'phone', elder_status: 'fine', result: '', delivery_confirm_mode: '' })
 const resolveForm = reactive({ action: 'close', resolution: '' })
 
 const canHandle = computed(() => ['community', 'admin'].includes(store.role))
@@ -149,7 +170,19 @@ function openFollowUp(row) {
   followUpForm.type = 'phone'
   followUpForm.elder_status = 'fine'
   followUpForm.result = ''
+  followUpForm.delivery_confirm_mode = ''
   followUpVisible.value = true
+}
+
+async function homeVisit(row) {
+  await ElMessageBox.confirm(
+    `老人「${row.elder_name}」已连续 ${row.no_answer_count} 次未开门，确认发起上门查看？将通知家属与社区网格员。`,
+    '发起上门查看',
+    { type: 'warning', confirmButtonText: '确认发起', cancelButtonText: '取消' }
+  )
+  await api.post(`/anomalies/${row.id}/home-visit`)
+  ElMessage.success('已发起上门查看，请尽快上门并登记回访结果')
+  await load()
 }
 
 async function doFollowUp() {

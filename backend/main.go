@@ -70,6 +70,7 @@ func main() {
 
 		auth.GET("/anomalies", s.listAnomalies)
 		auth.POST("/anomalies/:id/followups", s.requireRole("community", "admin"), s.createFollowUp)
+		auth.POST("/anomalies/:id/home-visit", s.requireRole("community", "admin"), s.initiateHomeVisit)
 		auth.POST("/anomalies/:id/resolve", s.requireRole("community", "admin"), s.resolveAnomaly)
 
 		auth.GET("/boxes", s.listBoxRecords)

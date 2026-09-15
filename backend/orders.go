@@ -399,6 +399,20 @@ func (s *Server) getOrder(c *gin.Context) {
 	if berr == nil {
 		box = gin.H{"id": bID, "boxes_issued": bIssued, "boxes_returned": bReturned, "return_method": bMethod, "status": bStatus}
 	}
+	// 未开门联系尝试记录（敲门/电话/邻里/家属）
+	contactAttempts := []gin.H{}
+	crows, _ := s.db.Query(`SELECT knock_done, phone_done, neighbor_done, family_done, note, created_at::text
+		FROM contact_attempts WHERE order_id=$1 ORDER BY id DESC`, id)
+	if crows != nil {
+		defer crows.Close()
+		for crows.Next() {
+			var k, p, n, f bool
+			var note, ca string
+			crows.Scan(&k, &p, &n, &f, &note, &ca)
+			contactAttempts = append(contactAttempts, gin.H{"knock_done": k, "phone_done": p,
+				"neighbor_done": n, "family_done": f, "note": note, "created_at": ca})
+		}
+	}
 	feedbacks := []gin.H{}
 	frows, _ := s.db.Query(`SELECT rating, suitable, content, created_at::text FROM feedbacks WHERE order_id=$1 ORDER BY id DESC`, id)
 	if frows != nil {
@@ -426,7 +440,7 @@ func (s *Server) getOrder(c *gin.Context) {
 		"batch_id": o.BatchID.Int64, "settled_in": o.SettledIn.Int64,
 		"created_at": o.CreatedAt, "updated_at": o.UpdatedAt,
 		"items": items, "delivery": delivery, "events": events, "anomalies": anomalies,
-		"box_record": box, "feedbacks": feedbacks,
+		"box_record": box, "feedbacks": feedbacks, "contact_attempts": contactAttempts,
 	})
 }
 

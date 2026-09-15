@@ -69,6 +69,8 @@ const labels = {
   high_priority: '高优先级工单（件）',
   today_pickup: '今日待现场取餐（单）',
   elders_total: '在册老人（人）',
+  focus_elders: '今日重点关注（人）',
+  high_risk_elders: '高风险老人（人）',
   month_signed: '本月实际签收（单）',
   month_refund: '本月退餐金额（元）',
   recycle_rate: '本月餐盒回收率（%）',

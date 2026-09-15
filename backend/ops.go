@@ -29,7 +29,7 @@ func (s *Server) listAnomalies(c *gin.Context) {
 	}
 	rows, err := s.db.Query(`SELECT a.id, a.order_id, COALESCE(o.order_no,''), a.elder_id, COALESCE(e.name,''),
 		a.type, a.priority, a.description, a.status, a.resolution, COALESCE(u.name,''), a.created_at::text, a.resolved_at::text,
-		(SELECT COUNT(*) FROM follow_ups f WHERE f.anomaly_id=a.id)
+		(SELECT COUNT(*) FROM follow_ups f WHERE f.anomaly_id=a.id), COALESCE(a.home_visit,FALSE), COALESCE(e.no_answer_count,0)
 		FROM anomalies a
 		LEFT JOIN orders o ON o.id=a.order_id
 		LEFT JOIN elders e ON e.id=a.elder_id
@@ -44,13 +44,14 @@ func (s *Server) listAnomalies(c *gin.Context) {
 	for rows.Next() {
 		var (
 			orderID, elderID                                sql.NullInt64
-			id, followCount                                 int
+			id, followCount, noAnswerCount                  int
 			orderNo, elderName, typ, priority, desc         string
 			status, resolution, reporter, createdAt         string
 			resolvedAt                                      *string
+			homeVisit                                       bool
 		)
 		rows.Scan(&id, &orderID, &orderNo, &elderID, &elderName, &typ, &priority, &desc,
-			&status, &resolution, &reporter, &createdAt, &resolvedAt, &followCount)
+			&status, &resolution, &reporter, &createdAt, &resolvedAt, &followCount, &homeVisit, &noAnswerCount)
 		ra := ""
 		if resolvedAt != nil {
 			ra = *resolvedAt
@@ -60,6 +61,7 @@ func (s *Server) listAnomalies(c *gin.Context) {
 			"type": typ, "type_name": anomalyTypeName(typ), "priority": priority, "description": desc,
 			"status": status, "resolution": resolution, "reported_by": reporter,
 			"created_at": createdAt, "resolved_at": ra, "follow_up_count": followCount,
+			"home_visit": homeVisit, "no_answer_count": noAnswerCount,
 		})
 	}
 	ok(c, list)
@@ -69,9 +71,10 @@ func (s *Server) listAnomalies(c *gin.Context) {
 func (s *Server) createFollowUp(c *gin.Context) {
 	anomalyID := c.Param("id")
 	var req struct {
-		Type        string `json:"type" binding:"required"` // phone / visit
-		ElderStatus string `json:"elder_status" binding:"required"`
-		Result      string `json:"result" binding:"required"`
+		Type                string `json:"type" binding:"required"` // phone / visit
+		ElderStatus         string `json:"elder_status" binding:"required"`
+		Result              string `json:"result" binding:"required"`
+		DeliveryConfirmMode string `json:"delivery_confirm_mode"` // 可选：direct / phone_first，调整后续配送方式
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, http.StatusBadRequest, "请填写回访方式、老人状态与回访结果")
@@ -79,6 +82,10 @@ func (s *Server) createFollowUp(c *gin.Context) {
 	}
 	if req.Type != "phone" && req.Type != "visit" {
 		req.Type = "phone"
+	}
+	if req.DeliveryConfirmMode != "" && req.DeliveryConfirmMode != "direct" && req.DeliveryConfirmMode != "phone_first" {
+		fail(c, http.StatusBadRequest, "配送方式须为 direct 或 phone_first")
+		return
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -108,20 +115,100 @@ func (s *Server) createFollowUp(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "更新工单失败")
 		return
 	}
+	// 回访结果联动老人风险标签与次日重点关注；联系已重建，连续未开门计数清零
+	riskChanged := ""
+	if elderID > 0 {
+		switch req.ElderStatus {
+		case "need_help":
+			tx.Exec(`UPDATE elders SET risk_level='attention', focus_until=CURRENT_DATE+1, no_answer_count=0 WHERE id=$1`, elderID)
+			riskChanged = "关注"
+		case "urgent":
+			tx.Exec(`UPDATE elders SET risk_level='high', focus_until=CURRENT_DATE+1, no_answer_count=0 WHERE id=$1`, elderID)
+			riskChanged = "高风险"
+		default: // fine
+			tx.Exec(`UPDATE elders SET no_answer_count=0 WHERE id=$1`, elderID)
+		}
+		// 后续配送方式调整（如：改为电话确认后再上门）
+		if req.DeliveryConfirmMode != "" {
+			tx.Exec(`UPDATE elders SET delivery_confirm_mode=$1 WHERE id=$2`, req.DeliveryConfirmMode, elderID)
+		}
+	}
 	if orderID > 0 {
-		addOrderEvent(tx, orderID, c.GetInt("uid"), c.GetString("name"), "社区回访",
-			map[string]string{"phone": "电话回访", "visit": "上门回访"}[req.Type]+"：老人状态 "+
-				map[string]string{"fine": "安好", "need_help": "需要协助", "urgent": "紧急"}[req.ElderStatus]+"。"+req.Result)
+		detail := map[string]string{"phone": "电话回访", "visit": "上门回访"}[req.Type] + "：老人状态 " +
+			map[string]string{"fine": "安好", "need_help": "需要协助", "urgent": "紧急"}[req.ElderStatus] + "。" + req.Result
+		if riskChanged != "" {
+			detail += "（老人风险标签调整为「" + riskChanged + "」，已生成次日重点关注）"
+		}
+		if req.DeliveryConfirmMode == "phone_first" {
+			detail += "（后续配送改为：电话确认后再上门）"
+		}
+		addOrderEvent(tx, orderID, c.GetInt("uid"), c.GetString("name"), "社区回访", detail)
 	}
 	if req.ElderStatus == "urgent" {
 		notifyElderParties(tx, elderID, orderID, "老人状态紧急", "老人「"+elderName+"」回访状态紧急："+req.Result)
 		notify(tx, 0, "community", orderID, "紧急回访预警", "老人「"+elderName+"」状态紧急，请立即上门核实")
 	}
+	if riskChanged != "" {
+		notifyElderParties(tx, elderID, orderID, "老人风险标签更新", "老人「"+elderName+"」风险标签调整为「"+riskChanged+"」，明日重点关注")
+	}
 	if err := tx.Commit(); err != nil {
 		fail(c, http.StatusInternalServerError, "提交失败")
 		return
 	}
-	ok(c, gin.H{"created": true})
+	ok(c, gin.H{"created": true, "risk_level": riskChanged})
+}
+
+// 发起上门查看：连续未开门达到阈值（≥2 次）后，社区可针对未开门工单发起上门查看
+func (s *Server) initiateHomeVisit(c *gin.Context) {
+	anomalyID := c.Param("id")
+	tx, err := s.db.Begin()
+	if err != nil {
+		fail(c, http.StatusInternalServerError, "操作失败")
+		return
+	}
+	defer tx.Rollback()
+	var aType, aStatus, elderName string
+	var elderID, orderID, noAnswerCount int
+	var homeVisit bool
+	err = tx.QueryRow(`SELECT a.type, a.status, COALESCE(a.elder_id,0), COALESCE(a.order_id,0), COALESCE(a.home_visit,FALSE),
+		COALESCE(e.name,''), COALESCE(e.no_answer_count,0)
+		FROM anomalies a LEFT JOIN elders e ON e.id=a.elder_id WHERE a.id=$1 FOR UPDATE OF a`, anomalyID).
+		Scan(&aType, &aStatus, &elderID, &orderID, &homeVisit, &elderName, &noAnswerCount)
+	if err != nil {
+		fail(c, http.StatusNotFound, "异常工单不存在")
+		return
+	}
+	if aType != "no_answer" {
+		fail(c, http.StatusBadRequest, "仅未开门工单可发起上门查看")
+		return
+	}
+	if aStatus == "resolved" {
+		fail(c, http.StatusBadRequest, "工单已办结")
+		return
+	}
+	if homeVisit {
+		fail(c, http.StatusBadRequest, "该工单已发起过上门查看")
+		return
+	}
+	if noAnswerCount < 2 {
+		fail(c, http.StatusBadRequest, "连续未开门未达阈值（≥2 次），暂不能发起上门查看，请先电话/邻里回访")
+		return
+	}
+	if _, err := tx.Exec(`UPDATE anomalies SET home_visit=TRUE, status='processing' WHERE id=$1`, anomalyID); err != nil {
+		fail(c, http.StatusInternalServerError, "发起失败")
+		return
+	}
+	if orderID > 0 {
+		addOrderEvent(tx, orderID, c.GetInt("uid"), c.GetString("name"), "发起上门查看",
+			"老人连续未开门 "+itoa(noAnswerCount)+" 次，社区安排工作人员上门查看")
+	}
+	notifyElderParties(tx, elderID, orderID, "社区将上门查看", "老人「"+elderName+"」连续未开门，社区工作人员将上门查看，请家属知悉")
+	notify(tx, 0, "community", orderID, "上门查看任务", "请尽快上门查看老人「"+elderName+"」并登记回访结果")
+	if err := tx.Commit(); err != nil {
+		fail(c, http.StatusInternalServerError, "提交失败")
+		return
+	}
+	ok(c, gin.H{"initiated": true})
 }
 
 // 办结异常：支持 关闭 / 重新配送 / 退餐退款 三种处理，联动餐单与补贴
@@ -411,6 +498,8 @@ func (s *Server) dashboard(c *gin.Context) {
 		stats["pending_boxes"] = q(`SELECT COALESCE(SUM(boxes_issued-boxes_returned),0) FROM box_records WHERE status<>'returned'`)
 		stats["today_pickup"] = q(`SELECT COUNT(*) FROM orders WHERE meal_date=CURRENT_DATE AND delivery_type='community_pickup' AND status='ready'`)
 		stats["elders_total"] = q(`SELECT COUNT(*) FROM elders WHERE active`)
+		stats["focus_elders"] = q(`SELECT COUNT(*) FROM elders WHERE active AND focus_until >= CURRENT_DATE`)
+		stats["high_risk_elders"] = q(`SELECT COUNT(*) FROM elders WHERE active AND risk_level='high'`)
 	case "finance", "admin":
 		stats["month_signed"] = q(`SELECT COUNT(*) FROM orders WHERE to_char(meal_date,'YYYY-MM')=$1 AND status IN ('signed','completed','settled')`, currentMonth())
 		stats["month_subsidy"] = qf(`SELECT COALESCE(SUM(subsidy_amount),0) FROM orders WHERE to_char(meal_date,'YYYY-MM')=$1 AND status IN ('signed','completed','settled')`, currentMonth())

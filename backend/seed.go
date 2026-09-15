@@ -340,7 +340,7 @@ func seed(db *sql.DB) error {
 		return err
 	}
 
-	// 09-13 张秀英未开门 -> 异常 -> 社区回访 -> 已办结（退餐退款）
+	// 09-13 张秀英未开门 -> 记录联系尝试 -> 异常 -> 社区回访 -> 已办结（改电话确认配送+次日重点关注）
 	oid3, err := insertOrder("张秀英", day(-2), "lunch", "home", "refunded", "family", "family01",
 		[]itemSpec{{"清蒸鲈鱼", 1, ""}, {"低盐时蔬", 1, ""}, {"软米饭", 1, ""}}, false, "")
 	if err != nil {
@@ -348,17 +348,29 @@ func seed(db *sql.DB) error {
 	}
 	db.Exec(`UPDATE orders SET refund_amount=payable_amount, cancel_reason='老人未开门且联系不上，社区确认老人在女儿家小住，退餐退款' WHERE id=$1`, oid3)
 	addDelivery(oid3, "rider01", "rider", "failed", day(-2)+" 11:06:00", "", "")
+	var dlv3 int
+	db.QueryRow(`SELECT id FROM deliveries WHERE order_id=$1`, oid3).Scan(&dlv3)
+	if _, err := db.Exec(`INSERT INTO contact_attempts(delivery_id, order_id, elder_id, knock_done, phone_done, neighbor_done, family_done, note, reported_by)
+		VALUES($1,$2,$3,TRUE,TRUE,TRUE,FALSE,'敲门多次无人应答，电话未接，邻居称老人被女儿接走，家属电话未接通',$4)`,
+		dlv3, oid3, eid["张秀英"], uid["rider01"]); err != nil {
+		return err
+	}
 	var an3 int
 	err = db.QueryRow(`INSERT INTO anomalies(order_id, elder_id, type, priority, description, reported_by, status, resolution, resolved_at)
 		VALUES($1,$2,'no_answer','high','骑手送达后多次敲门无人应答，电话未接通。老人为认知障碍独居老人，需立即核实安全。',$3,'resolved',
-		'电话回访其女张强，确认老人在女儿家小住，安全无虞；本单退餐退款。', $4) RETURNING id`,
+		'电话回访其女张强，确认老人在女儿家小住，安全；本单退餐退款；老人记性差易忘送餐，后续配送改为电话确认后再上门，次日重点关注。', $4) RETURNING id`,
 		oid3, eid["张秀英"], uid["rider01"], time.Now().Add(-24*time.Hour)).Scan(&an3)
 	if err != nil {
 		return err
 	}
 	if _, err := db.Exec(`INSERT INTO follow_ups(anomaly_id, elder_id, community_id, type, elder_status, result)
-		VALUES($1,$2,$3,'phone','fine','电话联系家属确认老人安全，老人暂住女儿家，已提醒家属提前请假报备')`,
+		VALUES($1,$2,$3,'phone','need_help','电话联系家属确认老人安全，老人暂住女儿家；老人记性变差，建议列为关注对象并改为电话确认配送')`,
 		an3, eid["张秀英"], uid["community01"]); err != nil {
+		return err
+	}
+	// 回访结果联动：张秀英 风险=关注、配送方式=电话确认后再上门、次日重点关注至今
+	if _, err := db.Exec(`UPDATE elders SET risk_level='attention', delivery_confirm_mode='phone_first', focus_until=$1 WHERE id=$2`,
+		day(0), eid["张秀英"]); err != nil {
 		return err
 	}
 

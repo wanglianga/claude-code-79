@@ -86,6 +86,19 @@
             </div>
           </div>
 
+          <div class="page-card" v-if="o.contact_attempts && o.contact_attempts.length">
+            <h3 class="page-title">未开门联系尝试记录</h3>
+            <div v-for="(a, i) in o.contact_attempts" :key="i" class="mb-12">
+              <div class="flex-row">
+                <el-tag :type="a.knock_done ? 'success' : 'info'" size="small">敲门{{ a.knock_done ? '✓' : '✗' }}</el-tag>
+                <el-tag :type="a.phone_done ? 'success' : 'info'" size="small">电话{{ a.phone_done ? '✓' : '✗' }}</el-tag>
+                <el-tag :type="a.neighbor_done ? 'success' : 'info'" size="small">邻里询问{{ a.neighbor_done ? '✓' : '✗' }}</el-tag>
+                <el-tag :type="a.family_done ? 'success' : 'info'" size="small">家属联系{{ a.family_done ? '✓' : '✗' }}</el-tag>
+              </div>
+              <div class="muted">{{ a.note }}（{{ fmtTime(a.created_at) }}）</div>
+            </div>
+          </div>
+
           <div class="page-card" v-if="o.box_record">
             <h3 class="page-title">餐盒回收</h3>
             <div class="flex-row">

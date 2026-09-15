@@ -35,6 +35,21 @@
           <el-tag v-if="row.mobility_impaired" type="danger" size="small" style="margin-left:2px">行动不便</el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="风险标签" width="100">
+        <template #default="{ row }">
+          <el-tag :type="row.risk_level === 'high' ? 'danger' : row.risk_level === 'attention' ? 'warning' : 'success'"
+            size="small" :effect="row.risk_level === 'normal' ? 'plain' : 'dark'">
+            {{ { normal: '正常', attention: '关注', high: '高风险' }[row.risk_level] }}
+          </el-tag>
+          <el-tag v-if="row.focus_until && row.focus_until >= today" type="danger" size="small" effect="dark" style="margin-left:2px">重点关注</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="配送方式" width="120">
+        <template #default="{ row }">
+          <el-tag v-if="row.delivery_confirm_mode === 'phone_first'" type="primary" size="small">电话确认后上门</el-tag>
+          <span v-else class="muted">直接上门</span>
+        </template>
+      </el-table-column>
       <el-table-column label="敲门确认" width="90">
         <template #default="{ row }">{{ row.need_knock_confirm ? '需要' : '—' }}</template>
       </el-table-column>
@@ -104,6 +119,14 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
+            <el-form-item label="配送方式">
+              <el-select v-model="form.delivery_confirm_mode" style="width:100%">
+                <el-option label="直接上门（默认）" value="direct" />
+                <el-option label="电话确认后再上门" value="phone_first" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="绑定家属账号">
               <el-select v-model="form.family_user_id" clearable style="width:100%">
                 <el-option v-for="u in familyUsers" :key="u.id" :label="`${u.name}（${u.username}）`" :value="u.id" />
@@ -140,9 +163,10 @@ const emptyForm = {
   subsidy_level: 'partial', subsidy_per_meal: 6, dietary_restrictions: '', need_knock_confirm: false,
   box_return_method: 'next_delivery', emergency_contact_name: '', emergency_contact_phone: '',
   cognitive_impairment: false, living_alone: false, mobility_impaired: false,
-  family_user_id: null, community_note: ''
+  delivery_confirm_mode: 'direct', family_user_id: null, community_note: ''
 }
 const form = reactive({ ...emptyForm })
+const today = new Date().toISOString().slice(0, 10)
 
 const canEdit = computed(() => ['community', 'admin'].includes(store.role))
 
