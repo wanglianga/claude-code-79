@@ -123,7 +123,9 @@ func (s *Server) listDeposits(c *gin.Context) {
 	ok(c, list)
 }
 
-// 收取押金：连续未归还超阈值，金额按老人类型
+// 收取押金：连续未归还超阈值，金额按老人类型。
+// 同一事务内锁定老人与其未终结押金单：待缴纳/已缴纳/免押审批中/已免押待回收
+// 均属唯一进行中的押金责任链，存在任一即禁止重复立单
 func (s *Server) chargeDeposit(c *gin.Context) {
 	elderID := c.Param("id")
 	tx, err := s.db.Begin()
@@ -132,15 +134,36 @@ func (s *Server) chargeDeposit(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
-	var elderName, elderType, depositStatus string
-	err = tx.QueryRow(`SELECT name, elder_type, deposit_status FROM elders WHERE id=$1 FOR UPDATE`, elderID).
-		Scan(&elderName, &elderType, &depositStatus)
+	var elderName, elderType string
+	err = tx.QueryRow(`SELECT name, elder_type FROM elders WHERE id=$1 FOR UPDATE`, elderID).
+		Scan(&elderName, &elderType)
 	if err != nil {
 		fail(c, http.StatusNotFound, "老人档案不存在")
 		return
 	}
-	if depositStatus == "pending" || depositStatus == "paid" || depositStatus == "waive_pending" {
-		fail(c, http.StatusBadRequest, "该老人已有进行中的押金单")
+	// 锁定该老人所有未终结押金单（refund_at 为空且处于责任状态），保证唯一进行中责任链
+	openRows, err := tx.Query(`SELECT id, status FROM box_deposits
+		WHERE elder_id=$1 AND refund_at IS NULL AND status IN ('pending','paid','waive_pending','waived')
+		ORDER BY id FOR UPDATE`, elderID)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, "校验押金链失败")
+		return
+	}
+	openID := 0
+	openStatus := ""
+	openCount := 0
+	for openRows.Next() {
+		var id int
+		var st string
+		openRows.Scan(&id, &st)
+		if openCount == 0 {
+			openID, openStatus = id, st
+		}
+		openCount++
+	}
+	openRows.Close()
+	if openCount > 0 {
+		fail(c, http.StatusBadRequest, "该老人存在进行中的押金责任链（单号 #"+itoa(openID)+"，状态 "+openStatus+"），请先闭环再立单")
 		return
 	}
 	unreturned := elderUnreturned(tx, atoi(elderID))
@@ -382,6 +405,20 @@ func (s *Server) doorCollect(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "更新库存失败")
 		return
 	}
+	// 全部归还后：闭合该老人未终结的免押责任链（refund_at 标记终结），避免孤儿押金单；
+	// 待缴纳/已缴纳押金单涉及资金，保留给退押流程显式处理
+	if elderUnreturned(tx, req.ElderID) == 0 {
+		if _, err := tx.Exec(`UPDATE box_deposits SET refund_at=now()
+			WHERE elder_id=$1 AND status='waived' AND refund_at IS NULL`, req.ElderID); err != nil {
+			fail(c, http.StatusInternalServerError, "闭合免押责任链失败")
+			return
+		}
+		if _, err := tx.Exec(`UPDATE elders SET deposit_status='none'
+			WHERE id=$1 AND deposit_status='waived'`, req.ElderID); err != nil {
+			fail(c, http.StatusInternalServerError, "同步老人押金状态失败")
+			return
+		}
+	}
 	notify(tx, 0, "community", 0, "上门回收完成", "老人「"+elderName+"」上门回收餐盒 "+itoa(collected)+" 个，已更新库存")
 	if err := tx.Commit(); err != nil {
 		fail(c, http.StatusInternalServerError, "提交失败")
@@ -408,12 +445,12 @@ func (s *Server) volunteerCollect(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
-	// 必须是免押审批中指定的回收志愿者（防止餐盒责任空转）
+	// 必须是免押审批指定、且尚未闭合的责任链对应的回收志愿者（防止餐盒责任空转与闭环错配）
 	var elderName string
 	var depositID int
 	err = tx.QueryRow(`SELECT e.name, d.id FROM box_deposits d JOIN elders e ON e.id=d.elder_id
-		WHERE d.elder_id=$1 AND d.status='waived' AND d.volunteer_id=$2
-		ORDER BY d.id DESC LIMIT 1`, req.ElderID, uid).Scan(&elderName, &depositID)
+		WHERE d.elder_id=$1 AND d.status='waived' AND d.volunteer_id=$2 AND d.refund_at IS NULL
+		ORDER BY d.id DESC LIMIT 1 FOR UPDATE OF d`, req.ElderID, uid).Scan(&elderName, &depositID)
 	if err != nil {
 		fail(c, http.StatusForbidden, "仅免押审批指定的回收志愿者可登记志愿回收")
 		return
@@ -427,10 +464,16 @@ func (s *Server) volunteerCollect(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "更新库存失败")
 		return
 	}
-	// 全部归还后押金单闭环（免押回收完成）
+	// 全部归还后仅闭合该授权责任链（refund_at 标记终结），老人汇总状态同步复位
 	if elderUnreturned(tx, req.ElderID) == 0 {
-		tx.Exec(`UPDATE box_deposits SET refund_at=now() WHERE id=$1`, depositID)
-		tx.Exec(`UPDATE elders SET deposit_status='none' WHERE id=$1`, req.ElderID)
+		if _, err := tx.Exec(`UPDATE box_deposits SET refund_at=now() WHERE id=$1 AND refund_at IS NULL`, depositID); err != nil {
+			fail(c, http.StatusInternalServerError, "闭合押金链失败")
+			return
+		}
+		if _, err := tx.Exec(`UPDATE elders SET deposit_status='none' WHERE id=$1`, req.ElderID); err != nil {
+			fail(c, http.StatusInternalServerError, "同步老人押金状态失败")
+			return
+		}
 	}
 	notify(tx, 0, "community", 0, "志愿回收完成", "志愿者回收老人「"+elderName+"」餐盒 "+itoa(collected)+" 个，库存已更新。"+req.Note)
 	if err := tx.Commit(); err != nil {
