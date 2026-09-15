@@ -61,7 +61,30 @@ func (s *Server) deliveryTasks(c *gin.Context) {
 func (s *Server) claimDelivery(c *gin.Context) {
 	id := c.Param("id")
 	uid := c.GetInt("uid")
-	res, err := s.db.Exec(`UPDATE deliveries SET deliverer_id=$1 WHERE id=$2 AND deliverer_id IS NULL AND status='assigned'`, uid, id)
+	expected := delivererTypeForRole(c.GetString("role"))
+	var dtype, status string
+	var delivererID *int
+	err := s.db.QueryRow(`SELECT deliverer_type, status, deliverer_id FROM deliveries WHERE id=$1`, id).
+		Scan(&dtype, &status, &delivererID)
+	if err != nil {
+		fail(c, http.StatusNotFound, "配送任务不存在")
+		return
+	}
+	if dtype != expected {
+		fail(c, http.StatusForbidden, "任务类型与当前角色不匹配，无法认领")
+		return
+	}
+	if delivererID != nil && *delivererID != uid {
+		fail(c, http.StatusForbidden, "任务已被其他配送员接单")
+		return
+	}
+	if status != "assigned" {
+		fail(c, http.StatusBadRequest, "任务已被接走或状态不允许接单")
+		return
+	}
+	// 原子认领：仅当任务仍未被认领时绑定当前配送员
+	res, err := s.db.Exec(`UPDATE deliveries SET deliverer_id=$1 WHERE id=$2 AND deliverer_id IS NULL AND status='assigned' AND deliverer_type=$3`,
+		uid, id, expected)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "接单失败")
 		return
@@ -99,13 +122,17 @@ func (s *Server) pickupDelivery(c *gin.Context) {
 	}
 	defer tx.Rollback()
 	var orderID, elderID int
-	var orderNo, status string
+	var orderNo, status, dtype string
 	var delivererID *int
-	err = tx.QueryRow(`SELECT d.order_id, o.order_no, d.status, d.deliverer_id, o.elder_id
+	err = tx.QueryRow(`SELECT d.order_id, o.order_no, d.status, d.deliverer_id, o.elder_id, d.deliverer_type
 		FROM deliveries d JOIN orders o ON o.id=d.order_id WHERE d.id=$1 FOR UPDATE`, id).
-		Scan(&orderID, &orderNo, &status, &delivererID, &elderID)
+		Scan(&orderID, &orderNo, &status, &delivererID, &elderID, &dtype)
 	if err != nil {
 		fail(c, http.StatusNotFound, "配送任务不存在")
+		return
+	}
+	if dtype != delivererTypeForRole(c.GetString("role")) {
+		fail(c, http.StatusForbidden, "任务类型与当前角色不匹配")
 		return
 	}
 	if status != "assigned" {
@@ -116,6 +143,7 @@ func (s *Server) pickupDelivery(c *gin.Context) {
 		fail(c, http.StatusForbidden, "该任务已被其他配送员接单")
 		return
 	}
+	// 取餐即绑定当前配送员
 	if _, err := tx.Exec(`UPDATE deliveries SET deliverer_id=$1, thermal_box_no=$2, route_info=$3, status='picked', pickup_time=now() WHERE id=$4`,
 		uid, req.ThermalBoxNo, req.RouteInfo, id); err != nil {
 		fail(c, http.StatusInternalServerError, "取餐登记失败")
@@ -157,25 +185,30 @@ func (s *Server) completeDelivery(c *gin.Context) {
 	var (
 		orderID, elderID, boxesIssued, timeoutMin int
 		orderNo, elderName, boxMethod, status     string
+		dtype                                     string
 		strict, needKnock                         bool
 		delivererID                               *int
 		pickupTime                                *string
 	)
 	err = tx.QueryRow(`SELECT d.order_id, o.order_no, d.status, d.deliverer_id, o.elder_id, e.name,
-		o.strict_mode, o.need_knock_confirm, o.boxes_issued, o.box_return_method, d.timeout_minutes, d.pickup_time::text
+		o.strict_mode, o.need_knock_confirm, o.boxes_issued, o.box_return_method, d.timeout_minutes, d.pickup_time::text, d.deliverer_type
 		FROM deliveries d JOIN orders o ON o.id=d.order_id JOIN elders e ON e.id=o.elder_id
 		WHERE d.id=$1 FOR UPDATE`, id).
 		Scan(&orderID, &orderNo, &status, &delivererID, &elderID, &elderName,
-			&strict, &needKnock, &boxesIssued, &boxMethod, &timeoutMin, &pickupTime)
+			&strict, &needKnock, &boxesIssued, &boxMethod, &timeoutMin, &pickupTime, &dtype)
 	if err != nil {
 		fail(c, http.StatusNotFound, "配送任务不存在")
+		return
+	}
+	if dtype != delivererTypeForRole(c.GetString("role")) {
+		fail(c, http.StatusForbidden, "任务类型与当前角色不匹配")
 		return
 	}
 	if status != "picked" {
 		fail(c, http.StatusBadRequest, "请先取餐再签收")
 		return
 	}
-	if delivererID != nil && *delivererID != uid {
+	if delivererID == nil || *delivererID != uid {
 		fail(c, http.StatusForbidden, "该任务不属于当前配送员")
 		return
 	}
@@ -202,8 +235,8 @@ func (s *Server) completeDelivery(c *gin.Context) {
 		isTimeout = mins > float64(timeoutMin)
 	}
 	if _, err := tx.Exec(`UPDATE deliveries SET status='delivered', delivered_time=now(), sign_photo_url=$1,
-		sign_type=$2, signed_by_name=$3, knock_confirmed=$4, is_timeout=$5 WHERE id=$6`,
-		req.SignPhotoURL, req.SignType, req.SignedByName, req.KnockConfirmed, isTimeout, id); err != nil {
+		sign_type=$2, signed_by_name=$3, knock_confirmed=$4, is_timeout=$5, deliverer_id=$6 WHERE id=$7`,
+		req.SignPhotoURL, req.SignType, req.SignedByName, req.KnockConfirmed, isTimeout, uid, id); err != nil {
 		fail(c, http.StatusInternalServerError, "签收登记失败")
 		return
 	}
@@ -265,22 +298,33 @@ func (s *Server) failDelivery(c *gin.Context) {
 	defer tx.Rollback()
 	var (
 		orderID, elderID int
-		orderNo, elderName, status string
+		orderNo, elderName, status, dtype string
 		strict           bool
+		delivererID      *int
 	)
-	err = tx.QueryRow(`SELECT d.order_id, o.order_no, d.status, o.elder_id, e.name, o.strict_mode
+	err = tx.QueryRow(`SELECT d.order_id, o.order_no, d.status, o.elder_id, e.name, o.strict_mode,
+		d.deliverer_type, d.deliverer_id
 		FROM deliveries d JOIN orders o ON o.id=d.order_id JOIN elders e ON e.id=o.elder_id
 		WHERE d.id=$1 FOR UPDATE`, id).
-		Scan(&orderID, &orderNo, &status, &elderID, &elderName, &strict)
+		Scan(&orderID, &orderNo, &status, &elderID, &elderName, &strict, &dtype, &delivererID)
 	if err != nil {
 		fail(c, http.StatusNotFound, "配送任务不存在")
+		return
+	}
+	if dtype != delivererTypeForRole(c.GetString("role")) {
+		fail(c, http.StatusForbidden, "任务类型与当前角色不匹配")
+		return
+	}
+	if delivererID != nil && *delivererID != uid {
+		fail(c, http.StatusForbidden, "该任务已被其他配送员接单，无权终止")
 		return
 	}
 	if status != "picked" && status != "assigned" {
 		fail(c, http.StatusBadRequest, "当前状态无法上报异常")
 		return
 	}
-	if _, err := tx.Exec(`UPDATE deliveries SET status='failed', anomaly_note=$1 WHERE id=$2`, req.Note, id); err != nil {
+	// 上报异常同时绑定当前配送员（未认领任务）
+	if _, err := tx.Exec(`UPDATE deliveries SET status='failed', anomaly_note=$1, deliverer_id=$2 WHERE id=$3`, req.Note, uid, id); err != nil {
 		fail(c, http.StatusInternalServerError, "上报失败")
 		return
 	}

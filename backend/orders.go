@@ -459,6 +459,11 @@ func (s *Server) modifyOrder(c *gin.Context) {
 		fail(c, http.StatusNotFound, "餐单不存在")
 		return
 	}
+	// 归属校验：家属/老人仅能操作绑定老人的餐单，社区/管理员协同处置
+	if !s.canOperateOrder(c, elderID) {
+		fail(c, http.StatusForbidden, "只能操作绑定老人的餐单")
+		return
+	}
 	if status != "pending" && status != "confirmed" {
 		fail(c, http.StatusBadRequest, "厨房已开始备餐，无法改餐；如需退餐请联系社区")
 		return
@@ -542,6 +547,11 @@ func (s *Server) cancelOrder(c *gin.Context) {
 		Scan(&status, &orderNo, &elderID, &payable)
 	if err != nil {
 		fail(c, http.StatusNotFound, "餐单不存在")
+		return
+	}
+	// 归属校验：家属/老人仅能操作绑定老人的餐单，社区/管理员协同处置
+	if !s.canOperateOrder(c, elderID) {
+		fail(c, http.StatusForbidden, "只能操作绑定老人的餐单")
 		return
 	}
 	if status == "settled" || status == "cancelled" || status == "refunded" {
@@ -671,6 +681,11 @@ func (s *Server) createFeedback(c *gin.Context) {
 		Scan(&elderID, &orderNo, &elderName)
 	if err != nil {
 		fail(c, http.StatusNotFound, "餐单不存在")
+		return
+	}
+	// 归属校验：家属/老人仅能为绑定老人的餐单反馈，社区/管理员可代录
+	if !s.canOperateOrder(c, elderID) {
+		fail(c, http.StatusForbidden, "只能为绑定老人的餐单提交反馈")
 		return
 	}
 	if _, err := tx.Exec(`INSERT INTO feedbacks(order_id, elder_id, from_user, rating, suitable, content) VALUES($1,$2,$3,$4,$5,$6)`,

@@ -98,6 +98,35 @@ func createAnomaly(tx *sql.Tx, orderID, elderID int, atype, description string, 
 	return id, err
 }
 
+// 餐单操作权限：家属/老人仅限其绑定老人的餐单，社区/管理员保持协同处置权限，
+// 其余角色（厨房/骑手/志愿者/财政）无权操作餐单内容
+func (s *Server) canOperateOrder(c *gin.Context, elderID int) bool {
+	role := c.GetString("role")
+	uid := c.GetInt("uid")
+	switch role {
+	case "community", "admin":
+		return true
+	case "family":
+		var n int
+		s.db.QueryRow(`SELECT COUNT(*) FROM elders WHERE id=$1 AND family_user_id=$2`, elderID, uid).Scan(&n)
+		return n > 0
+	case "elder":
+		var n int
+		s.db.QueryRow(`SELECT COUNT(*) FROM elders WHERE id=$1 AND user_id=$2`, elderID, uid).Scan(&n)
+		return n > 0
+	default:
+		return false
+	}
+}
+
+// 配送员角色与任务类型匹配：骑手↔rider，志愿者↔volunteer
+func delivererTypeForRole(role string) string {
+	if role == "volunteer" {
+		return "volunteer"
+	}
+	return "rider"
+}
+
 func anomalyTypeName(t string) string {
 	switch t {
 	case "no_answer":

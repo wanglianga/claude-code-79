@@ -52,9 +52,9 @@ func main() {
 		auth.POST("/orders", s.requireRole("elder", "family", "community", "admin"), s.createOrder)
 		auth.GET("/orders/:id", s.getOrder)
 		auth.PUT("/orders/:id/items", s.requireRole("family", "community", "admin", "elder"), s.modifyOrder)
-		auth.POST("/orders/:id/cancel", s.cancelOrder)
+		auth.POST("/orders/:id/cancel", s.requireRole("family", "elder", "community", "admin"), s.cancelOrder)
 		auth.POST("/orders/:id/pickup-confirm", s.requireRole("community", "admin"), s.confirmPickup)
-		auth.POST("/orders/:id/feedback", s.createFeedback)
+		auth.POST("/orders/:id/feedback", s.requireRole("family", "elder", "community", "admin"), s.createFeedback)
 
 		auth.GET("/kitchen/summary", s.requireRole("kitchen", "admin"), s.kitchenSummary)
 		auth.GET("/kitchen/batches", s.requireRole("kitchen", "admin", "community"), s.listBatches)
