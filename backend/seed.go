@@ -322,6 +322,15 @@ func seed(db *sql.DB) error {
 		return err
 	}
 
+	// 09-12 张秀英又一单已签收，餐盒部分回收（累计未归还 3 个，超押金阈值）
+	oid1b, err := insertOrder("张秀英", day(-3), "dinner", "home", "signed", "family", "family01",
+		[]itemSpec{{"番茄炒蛋", 1, ""}, {"无糖南瓜粥", 1, ""}, {"软米饭", 1, ""}}, false, "")
+	if err != nil {
+		return err
+	}
+	addDelivery(oid1b, "rider01", "rider", "delivered", day(-3)+" 17:05:00", day(-3)+" 17:30:00", "张秀英")
+	addBox(oid1b, "张秀英", 2, 1, "next_delivery", "partial")
+
 	// 09-12 李建国已签收、餐盒已回社区点；其反馈饭菜不适合 -> meal_unsuitable(open)
 	oid2, err := insertOrder("李建国", day(-3), "lunch", "home", "completed", "family", "family02",
 		[]itemSpec{{"番茄炒蛋", 1, ""}, {"无糖南瓜粥", 1, ""}, {"软米饭", 1, ""}}, false, "")
@@ -391,6 +400,15 @@ func seed(db *sql.DB) error {
 	addDelivery(oid5, "volunteer01", "volunteer", "delivered", day(-1)+" 11:15:00", day(-1)+" 11:50:00", "陈福生")
 	addBox(oid5, "陈福生", 2, 1, "next_delivery", "partial")
 
+	// 09-13 陈福生又一单已签收，餐盒未回收（累计未归还 3 个，超押金阈值）
+	oid5b, err := insertOrder("陈福生", day(-2), "dinner", "home", "signed", "community", "community01",
+		[]itemSpec{{"番茄炒蛋", 1, ""}, {"软米饭", 1, ""}}, false, "")
+	if err != nil {
+		return err
+	}
+	addDelivery(oid5b, "rider01", "rider", "delivered", day(-2)+" 17:10:00", day(-2)+" 17:40:00", "陈福生")
+	addBox(oid5b, "陈福生", 2, 0, "next_delivery", "pending")
+
 	// 中秋节加餐（未来日期，节日特供）
 	if _, err := insertOrder("张秀英", day(10), "lunch", "home", "confirmed", "community", "community01",
 		[]itemSpec{{"节日八宝饭", 1, ""}, {"清蒸鲈鱼", 1, ""}, {"低盐时蔬", 1, ""}}, true, "中秋节加餐"); err != nil {
@@ -418,6 +436,19 @@ func seed(db *sql.DB) error {
 	// ---------- 补贴资格变更记录 ----------
 	if _, err := db.Exec(`INSERT INTO subsidy_changes(elder_id, old_level, new_level, old_amount, new_amount, reason, changed_by, affected_orders)
 		VALUES($1,'partial','partial',6,8,'街道复核提高补贴标准',$2,0)`, eid["李建国"], uid["community01"]); err != nil {
+		return err
+	}
+
+	// ---------- 餐盒押金演示：张秀英为困难老人（可申请免押+志愿回收） ----------
+	if _, err := db.Exec(`UPDATE elders SET elder_type='difficult' WHERE name='张秀英'`); err != nil {
+		return err
+	}
+	// 餐盒库存：基准 50，扣除在途未归还（张秀英 3 个 + 陈福生 1 个）
+	if _, err := db.Exec(`INSERT INTO box_inventory(location, stock) VALUES('社区食堂', 50) ON CONFLICT (location) DO NOTHING`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE box_inventory SET stock = 50 - COALESCE((
+		SELECT SUM(boxes_issued-boxes_returned) FROM box_records),0), updated_at=now() WHERE location='社区食堂'`); err != nil {
 		return err
 	}
 

@@ -257,20 +257,26 @@ func (s *Server) completeDelivery(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "更新老人风险计数失败")
 		return
 	}
-	// 餐盒台账：现场回收方式立即视为回收
-	returned := 0
-	boxStatus := "pending"
-	if boxMethod == "onsite" {
-		returned = boxesIssued
-		boxStatus = "returned"
-	}
-	_, err = tx.Exec(`INSERT INTO box_records(order_id, elder_id, boxes_issued, boxes_returned, return_method, status, returned_at)
-		VALUES($1,$2,$3,$4,$5,$6, CASE WHEN $6='pending' THEN NULL ELSE now() END)
-		ON CONFLICT (order_id) DO UPDATE SET boxes_returned=EXCLUDED.boxes_returned, status=EXCLUDED.status`,
-		orderID, elderID, boxesIssued, returned, boxMethod, boxStatus)
-	if err != nil {
-		fail(c, http.StatusInternalServerError, "登记餐盒台账失败")
-		return
+	// 餐盒台账：现场回收方式立即视为回收；发放出账、回收入账
+	if boxesIssued > 0 {
+		returned := 0
+		boxStatus := "pending"
+		if boxMethod == "onsite" {
+			returned = boxesIssued
+			boxStatus = "returned"
+		}
+		_, err = tx.Exec(`INSERT INTO box_records(order_id, elder_id, boxes_issued, boxes_returned, return_method, status, returned_at)
+			VALUES($1,$2,$3,$4,$5,$6, CASE WHEN $6='pending' THEN NULL ELSE now() END)
+			ON CONFLICT (order_id) DO UPDATE SET boxes_returned=EXCLUDED.boxes_returned, status=EXCLUDED.status`,
+			orderID, elderID, boxesIssued, returned, boxMethod, boxStatus)
+		if err != nil {
+			fail(c, http.StatusInternalServerError, "登记餐盒台账失败")
+			return
+		}
+		if err := adjustInventory(tx, returned-boxesIssued); err != nil {
+			fail(c, http.StatusInternalServerError, "更新餐盒库存失败")
+			return
+		}
 	}
 	addOrderEvent(tx, orderID, uid, c.GetString("name"), "送达签收",
 		"签收人："+req.SignedByName+"（"+req.SignType+"）；敲门确认："+map[bool]string{true: "是", false: "否"}[req.KnockConfirmed])

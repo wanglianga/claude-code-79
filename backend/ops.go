@@ -285,6 +285,13 @@ func (s *Server) listBoxRecords(c *gin.Context) {
 		args = append(args, v)
 		conds = append(conds, `b.status=$`+itoa(len(args)))
 	}
+	// 家属/老人仅看绑定老人的餐盒记录
+	role := c.GetString("role")
+	uid := c.GetInt("uid")
+	if role == "family" || role == "elder" {
+		args = append(args, uid)
+		conds = append(conds, `b.elder_id IN (SELECT id FROM elders WHERE family_user_id=$`+itoa(len(args))+` OR user_id=$`+itoa(len(args))+`)`)
+	}
 	rows, err := s.db.Query(`SELECT b.id, b.order_id, o.order_no, e.name, b.boxes_issued, b.boxes_returned,
 		b.return_method, b.status, b.returned_at::text, o.meal_date::text
 		FROM box_records b JOIN orders o ON o.id=b.order_id JOIN elders e ON e.id=b.elder_id
@@ -356,6 +363,11 @@ func (s *Server) returnBoxes(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "回收登记失败")
 		return
 	}
+	// 回收入账：库存增加
+	if err := adjustInventory(tx, req.Count); err != nil {
+		fail(c, http.StatusInternalServerError, "更新库存失败")
+		return
+	}
 	if newStatus == "returned" {
 		// 餐盒全部回收 => 餐单完成闭环
 		tx.Exec(`UPDATE orders SET status='completed', updated_at=now() WHERE id=$1 AND status='signed'`, orderID)
@@ -396,6 +408,8 @@ func (s *Server) urgeBoxReturn(c *gin.Context) {
 	}
 	anID, _ := createAnomaly(tx, orderID, elderID, "box_not_returned",
 		"餐单 "+orderNo+"（老人「"+elderName+"」）餐盒 "+itoa(issued-returned)+" 个未回收，请社区跟进。", c.GetInt("uid"))
+	// 提醒次数 +1（连续未归还跟踪）
+	tx.Exec(`UPDATE box_records SET remind_count=remind_count+1 WHERE id=$1`, id)
 	notify(tx, 0, "community", orderID, "餐盒未回收", orderNo+" 餐盒未回收，已生成工单 #"+itoa(anID))
 	addOrderEvent(tx, orderID, c.GetInt("uid"), c.GetString("name"), "餐盒催回", "生成催回工单")
 	if err := tx.Commit(); err != nil {
@@ -527,6 +541,24 @@ func (s *Server) dashboard(c *gin.Context) {
 		return out
 	}()
 	ok(c, stats)
+}
+
+// 志愿者列表（社区发起免押申请时选择回收志愿者）
+func (s *Server) listVolunteers(c *gin.Context) {
+	rows, err := s.db.Query(`SELECT id, name, phone FROM users WHERE role='volunteer' AND active ORDER BY id`)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, "查询志愿者失败")
+		return
+	}
+	defer rows.Close()
+	list := []gin.H{}
+	for rows.Next() {
+		var id int
+		var name, phone string
+		rows.Scan(&id, &name, &phone)
+		list = append(list, gin.H{"id": id, "name": name, "phone": phone})
+	}
+	ok(c, list)
 }
 
 // ---------------- 用户管理（平台管理员） ----------------

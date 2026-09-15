@@ -56,6 +56,20 @@
       <el-table-column label="餐盒回收" width="110">
         <template #default="{ row }">{{ boxMethods[row.box_return_method] }}</template>
       </el-table-column>
+      <el-table-column label="类型" width="80">
+        <template #default="{ row }">
+          <el-tag v-if="row.elder_type === 'difficult'" type="warning" size="small">困难</el-tag>
+          <span v-else class="muted">普通</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="押金" width="90">
+        <template #default="{ row }">
+          <el-tag v-if="row.deposit_status !== 'none'" :type="{ pending: 'danger', paid: 'warning', waive_pending: 'warning', waived: 'success', refunded: 'info' }[row.deposit_status]" size="small">
+            {{ { pending: '待缴纳', paid: '已缴纳', waive_pending: '免押审批中', waived: '已免押', refunded: '已退还' }[row.deposit_status] }}
+          </el-tag>
+          <span v-else class="muted">—</span>
+        </template>
+      </el-table-column>
       <el-table-column label="操作" width="90" fixed="right">
         <template #default="{ row }">
           <el-button v-if="canEdit" size="small" @click="openForm(row)">编辑</el-button>
@@ -119,6 +133,14 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
+            <el-form-item label="老人类型">
+              <el-select v-model="form.elder_type" style="width:100%">
+                <el-option label="普通老人" value="normal" />
+                <el-option label="困难老人（押金减半/可免押）" value="difficult" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="配送方式">
               <el-select v-model="form.delivery_confirm_mode" style="width:100%">
                 <el-option label="直接上门（默认）" value="direct" />
@@ -163,7 +185,7 @@ const emptyForm = {
   subsidy_level: 'partial', subsidy_per_meal: 6, dietary_restrictions: '', need_knock_confirm: false,
   box_return_method: 'next_delivery', emergency_contact_name: '', emergency_contact_phone: '',
   cognitive_impairment: false, living_alone: false, mobility_impaired: false,
-  delivery_confirm_mode: 'direct', family_user_id: null, community_note: ''
+  elder_type: 'normal', delivery_confirm_mode: 'direct', family_user_id: null, community_note: ''
 }
 const form = reactive({ ...emptyForm })
 const today = new Date().toISOString().slice(0, 10)

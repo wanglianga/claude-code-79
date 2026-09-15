@@ -13,6 +13,16 @@
       </div>
     </div>
 
+    <div class="page-card" v-if="inventory !== null && ['community','kitchen','admin','finance'].includes(store.role)">
+      <h3 class="page-title">餐盒库存</h3>
+      <div class="flex-row">
+        <el-tag :type="inventory.stock < 10 ? 'danger' : 'success'" size="large" effect="plain" style="font-size:16px; padding:14px 18px">
+          可循环餐盒库存：{{ inventory.stock }} 个
+        </el-tag>
+        <span class="muted">发放出账、回收（含志愿回收）入账 · 更新于 {{ fmtTime(inventory.updated_at) }}</span>
+      </div>
+    </div>
+
     <div class="page-card">
       <h3 class="page-title">今日餐单状态分布（各端状态实时一致）</h3>
       <div v-if="todayStats.length === 0" class="muted">今日暂无餐单</div>
@@ -42,11 +52,12 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { store, roleNames } from '../store'
-import { orderStatus } from '../utils'
+import { orderStatus, fmtTime } from '../utils'
 import api from '../api'
 
 const stats = ref({})
 const todayStats = ref([])
+const inventory = ref(null)
 
 const greetings = ['您好']
 const greeting = computed(() => greetings[0])
@@ -90,5 +101,8 @@ onMounted(async () => {
   const d = await api.get('/dashboard')
   stats.value = d
   todayStats.value = d.today_by_status || []
+  if (['community', 'kitchen', 'admin', 'finance'].includes(store.role)) {
+    inventory.value = await api.get('/boxes/inventory').catch(() => null)
+  }
 })
 </script>

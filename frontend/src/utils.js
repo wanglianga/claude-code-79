@@ -54,6 +54,26 @@ export const boxStatus = {
   returned: { text: '已回收', type: 'success' }
 }
 
+export const boxPolicies = {
+  normal: { text: '正常发放', type: 'success' },
+  disposable: { text: '一次性餐盒', type: 'warning' },
+  paused: { text: '暂停发放', type: 'danger' }
+}
+
+export const depositStatus = {
+  none: { text: '无押金', type: 'info' },
+  pending: { text: '待缴纳', type: 'danger' },
+  paid: { text: '已缴纳', type: 'warning' },
+  waive_pending: { text: '免押审批中', type: 'warning' },
+  waived: { text: '已免押', type: 'success' },
+  refunded: { text: '已退还', type: 'info' }
+}
+
+export const elderTypes = {
+  normal: { text: '普通老人', type: 'info' },
+  difficult: { text: '困难老人', type: 'warning' }
+}
+
 export const deliveryStatus = {
   assigned: { text: '待接单/待取餐', type: 'info' },
   picked: { text: '配送中', type: 'warning' },

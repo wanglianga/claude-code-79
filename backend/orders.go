@@ -125,17 +125,17 @@ func (s *Server) createOrder(c *gin.Context) {
 	defer tx.Rollback()
 
 	var (
-		elderName, address, boxMethod string
-		subsidyPerMeal                float64
-		needKnock, cog, alone, mob    bool
-		active                        bool
-		familyID                      sql.NullInt64
-		elderUserID                   sql.NullInt64
+		elderName, address, boxMethod, boxPolicy string
+		subsidyPerMeal                           float64
+		needKnock, cog, alone, mob               bool
+		active                                   bool
+		familyID                                 sql.NullInt64
+		elderUserID                              sql.NullInt64
 	)
 	err = tx.QueryRow(`SELECT name, address, box_return_method, subsidy_per_meal, need_knock_confirm,
-		cognitive_impairment, living_alone, mobility_impaired, active, family_user_id, user_id
+		cognitive_impairment, living_alone, mobility_impaired, active, family_user_id, user_id, box_policy
 		FROM elders WHERE id=$1`, req.ElderID).
-		Scan(&elderName, &address, &boxMethod, &subsidyPerMeal, &needKnock, &cog, &alone, &mob, &active, &familyID, &elderUserID)
+		Scan(&elderName, &address, &boxMethod, &subsidyPerMeal, &needKnock, &cog, &alone, &mob, &active, &familyID, &elderUserID, &boxPolicy)
 	if err != nil || !active {
 		fail(c, http.StatusBadRequest, "老人档案不存在或已停用")
 		return
@@ -151,6 +151,10 @@ func (s *Server) createOrder(c *gin.Context) {
 	}
 	if req.Address != "" {
 		address = req.Address
+	}
+	// 餐盒策略：改用一次性餐盒或暂停新增发放时，本单不再发放可循环餐盒
+	if boxPolicy == "disposable" || boxPolicy == "paused" {
+		req.BoxesIssued = 0
 	}
 	// 同日同餐别防重复
 	var dup int
@@ -233,8 +237,13 @@ func (s *Server) createOrder(c *gin.Context) {
 			return
 		}
 	}
-	addOrderEvent(tx, orderID, uid, c.GetString("name"), "提交订餐",
-		"来源："+sourceName(source)+"；金额 "+ftoa(total)+" 元，补贴 "+ftoa(subsidyAmount)+" 元")
+	eventDetail := "来源：" + sourceName(source) + "；金额 " + ftoa(total) + " 元，补贴 " + ftoa(subsidyAmount) + " 元"
+	if boxPolicy == "disposable" {
+		eventDetail += "；按餐盒策略改用一次性餐盒"
+	} else if boxPolicy == "paused" {
+		eventDetail += "；按餐盒策略暂停发放可循环餐盒"
+	}
+	addOrderEvent(tx, orderID, uid, c.GetString("name"), "提交订餐", eventDetail)
 	notifyElderParties(tx, req.ElderID, orderID, "新餐单 "+no, "老人「"+elderName+"」"+req.MealDate+" 餐单已提交，等待厨房备餐")
 	notify(tx, 0, "kitchen", orderID, "新餐单待备餐", no+"（"+elderName+"，"+req.MealDate+"）")
 	if err := tx.Commit(); err != nil {
@@ -292,16 +301,18 @@ func (s *Server) getOrder(c *gin.Context) {
 		}
 		elderName, elderPhone, elderAddr, dietary, emergName, emergPhone string
 		cog, alone, mob                                                  bool
+		elderBoxPolicy                                                 string
 	)
 	err := s.db.QueryRow(`SELECT o.id, o.order_no, o.elder_id, e.name, e.phone, e.address, e.dietary_restrictions,
 		e.emergency_contact_name, e.emergency_contact_phone, e.cognitive_impairment, e.living_alone, e.mobility_impaired,
+		e.box_policy,
 		o.created_by, o.order_source, o.meal_date::text, o.meal_type, o.delivery_type, o.address, o.need_knock_confirm,
 		o.strict_mode, o.box_return_method, o.boxes_issued, o.total_amount, o.subsidy_amount, o.holiday_extra,
 		o.payable_amount, o.refund_amount, o.is_holiday_special, o.holiday_name, o.status, o.notes, o.cancel_reason,
 		o.batch_id, o.settled_in, o.created_at::text, o.updated_at::text
 		FROM orders o JOIN elders e ON e.id=o.elder_id WHERE o.id=$1`, id).
 		Scan(&id, &o.OrderNo, &o.ElderID, &elderName, &elderPhone, &elderAddr, &dietary,
-			&emergName, &emergPhone, &cog, &alone, &mob,
+			&emergName, &emergPhone, &cog, &alone, &mob, &elderBoxPolicy,
 			&o.CreatedBy, &o.Source, &o.MealDate, &o.MealType, &o.DelType, &o.Address, &o.NeedKnock,
 			&o.Strict, &o.BoxMethod, &o.BoxesIssued, &o.Total, &o.Subsidy, &o.HExtra,
 			&o.Payable, &o.Refund, &o.Holiday, &o.HolidayName, &o.Status, &o.Notes, &o.CancelReason,
@@ -429,7 +440,7 @@ func (s *Server) getOrder(c *gin.Context) {
 		"id": atoi(id), "order_no": o.OrderNo, "status": o.Status,
 		"elder": gin.H{"id": o.ElderID, "name": elderName, "phone": elderPhone, "address": elderAddr,
 			"dietary_restrictions": dietary, "emergency_contact_name": emergName, "emergency_contact_phone": emergPhone,
-			"cognitive_impairment": cog, "living_alone": alone, "mobility_impaired": mob},
+			"cognitive_impairment": cog, "living_alone": alone, "mobility_impaired": mob, "box_policy": elderBoxPolicy},
 		"order_source": o.Source, "meal_date": o.MealDate[:10], "meal_type": o.MealType, "delivery_type": o.DelType,
 		"address": o.Address, "need_knock_confirm": o.NeedKnock, "strict_mode": o.Strict,
 		"box_return_method": o.BoxMethod, "boxes_issued": o.BoxesIssued,
@@ -644,19 +655,25 @@ func (s *Server) confirmPickup(c *gin.Context) {
 	if returned > boxesIssued {
 		returned = boxesIssued
 	}
-	boxStatus := "pending"
-	if returned == boxesIssued {
-		boxStatus = "returned"
-	} else if returned > 0 {
-		boxStatus = "partial"
-	}
-	_, err = tx.Exec(`INSERT INTO box_records(order_id, elder_id, boxes_issued, boxes_returned, return_method, status, returned_at)
-		VALUES($1,$2,$3,$4,'onsite',$5, CASE WHEN $5='pending' THEN NULL ELSE now() END)
-		ON CONFLICT (order_id) DO UPDATE SET boxes_returned=EXCLUDED.boxes_returned, status=EXCLUDED.status`,
-		id, elderID, boxesIssued, returned, boxStatus)
-	if err != nil {
-		fail(c, http.StatusInternalServerError, "记录餐盒失败")
-		return
+	if boxesIssued > 0 {
+		boxStatus := "pending"
+		if returned == boxesIssued {
+			boxStatus = "returned"
+		} else if returned > 0 {
+			boxStatus = "partial"
+		}
+		_, err = tx.Exec(`INSERT INTO box_records(order_id, elder_id, boxes_issued, boxes_returned, return_method, status, returned_at)
+			VALUES($1,$2,$3,$4,'onsite',$5, CASE WHEN $5='pending' THEN NULL ELSE now() END)
+			ON CONFLICT (order_id) DO UPDATE SET boxes_returned=EXCLUDED.boxes_returned, status=EXCLUDED.status`,
+			id, elderID, boxesIssued, returned, boxStatus)
+		if err != nil {
+			fail(c, http.StatusInternalServerError, "记录餐盒失败")
+			return
+		}
+		if err := adjustInventory(tx, returned-boxesIssued); err != nil {
+			fail(c, http.StatusInternalServerError, "更新餐盒库存失败")
+			return
+		}
 	}
 	addOrderEvent(tx, atoi(id), c.GetInt("uid"), c.GetString("name"), "社区食堂现场签收",
 		"签收人："+req.SignedByName+"；现场回收餐盒 "+itoa(returned)+" 个")

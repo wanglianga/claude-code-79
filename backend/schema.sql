@@ -271,6 +271,39 @@ ALTER TABLE elders ADD COLUMN IF NOT EXISTS delivery_confirm_mode TEXT NOT NULL 
 ALTER TABLE elders ADD COLUMN IF NOT EXISTS no_answer_count INT NOT NULL DEFAULT 0;
 ALTER TABLE elders ADD COLUMN IF NOT EXISTS focus_until DATE;
 ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS home_visit BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE elders ADD COLUMN IF NOT EXISTS elder_type TEXT NOT NULL DEFAULT 'normal';       -- 老人类型：normal/difficult（困难）
+ALTER TABLE elders ADD COLUMN IF NOT EXISTS box_policy TEXT NOT NULL DEFAULT 'normal';       -- 餐盒策略：normal/disposable(一次性)/paused(暂停发放)
+ALTER TABLE elders ADD COLUMN IF NOT EXISTS deposit_status TEXT NOT NULL DEFAULT 'none';     -- 押金状态：none/pending/paid/waive_pending/waived/refunded
+ALTER TABLE box_records ADD COLUMN IF NOT EXISTS remind_count INT NOT NULL DEFAULT 0;        -- 提醒次数
+ALTER TABLE box_records ADD COLUMN IF NOT EXISTS family_feedback TEXT NOT NULL DEFAULT '';   -- 家属反馈
+
+-- 餐盒押金台账：收取/缴纳/免押审批/退还，留存社区负责人与回收志愿者防止责任空转
+CREATE TABLE IF NOT EXISTS box_deposits (
+    id                 SERIAL PRIMARY KEY,
+    elder_id           INT NOT NULL REFERENCES elders(id),
+    amount             NUMERIC(10,2) NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','paid','waive_pending','waived','refunded')),
+    unreturned_snapshot INT NOT NULL DEFAULT 0,   -- 触发时未回收数量
+    family_feedback    TEXT NOT NULL DEFAULT '',  -- 家属反馈
+    created_by         INT REFERENCES users(id),  -- 发起收取的社区人员
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    paid_at            TIMESTAMPTZ,
+    waive_applicant_id INT REFERENCES users(id),  -- 免押申请：社区负责人
+    waive_reason       TEXT NOT NULL DEFAULT '',
+    waive_approver_id  INT REFERENCES users(id),  -- 免押审批人
+    waived_at          TIMESTAMPTZ,
+    volunteer_id       INT REFERENCES users(id),  -- 回收志愿者
+    volunteer_name     TEXT NOT NULL DEFAULT '',
+    refund_at          TIMESTAMPTZ
+);
+
+-- 餐盒库存：发放出账、回收入账（含志愿回收）
+CREATE TABLE IF NOT EXISTS box_inventory (
+    id         SERIAL PRIMARY KEY,
+    location   TEXT NOT NULL UNIQUE,
+    stock      INT NOT NULL DEFAULT 50,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- 未开门联系尝试记录：敲门、电话、邻里询问、家属联系
 CREATE TABLE IF NOT EXISTS contact_attempts (

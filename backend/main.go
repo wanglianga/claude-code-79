@@ -76,6 +76,18 @@ func main() {
 		auth.GET("/boxes", s.listBoxRecords)
 		auth.POST("/boxes/:id/return", s.requireRole("community", "rider", "volunteer", "admin"), s.returnBoxes)
 		auth.POST("/boxes/:id/urge", s.requireRole("community", "admin"), s.urgeBoxReturn)
+		auth.POST("/boxes/:id/family-feedback", s.requireRole("family", "elder"), s.familyBoxFeedback)
+		auth.GET("/boxes/elder-status", s.listElderBoxStatus)
+		auth.GET("/boxes/inventory", s.boxInventory)
+		auth.POST("/boxes/door-collect", s.requireRole("community", "admin"), s.doorCollect)
+		auth.POST("/boxes/volunteer-collect", s.requireRole("volunteer"), s.volunteerCollect)
+		auth.POST("/elders/:id/box-policy", s.requireRole("community", "admin"), s.setBoxPolicy)
+		auth.POST("/elders/:id/deposit", s.requireRole("community", "admin"), s.chargeDeposit)
+		auth.GET("/deposits", s.listDeposits)
+		auth.POST("/deposits/:id/pay", s.requireRole("family", "elder", "community", "admin"), s.payDeposit)
+		auth.POST("/deposits/:id/waive-apply", s.requireRole("community", "admin"), s.waiveApply)
+		auth.POST("/deposits/:id/waive-approve", s.requireRole("admin"), s.waiveApprove)
+		auth.POST("/deposits/:id/refund", s.requireRole("community", "admin"), s.refundDeposit)
 
 		auth.GET("/finance/reconciliations", s.requireRole("finance", "admin"), s.listReconciliations)
 		auth.POST("/finance/reconciliations", s.requireRole("finance", "admin"), s.createReconciliation)
@@ -87,6 +99,8 @@ func main() {
 		auth.GET("/notifications", s.listNotifications)
 		auth.GET("/notifications/unread-count", s.unreadCount)
 		auth.POST("/notifications/read-all", s.readAllNotifications)
+
+		auth.GET("/volunteers", s.requireRole("community", "admin"), s.listVolunteers)
 
 		auth.GET("/admin/users", s.requireRole("admin"), s.listUsers)
 		auth.POST("/admin/users", s.requireRole("admin"), s.createUser)

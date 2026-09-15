@@ -21,7 +21,11 @@
           <el-descriptions-item label="紧急联系人">{{ o.elder.emergency_contact_name }} {{ o.elder.emergency_contact_phone }}</el-descriptions-item>
           <el-descriptions-item label="下单来源">{{ orderSources[o.order_source] }}</el-descriptions-item>
           <el-descriptions-item label="敲门确认">{{ o.need_knock_confirm ? '需要' : '不需要' }}</el-descriptions-item>
-          <el-descriptions-item label="餐盒回收">{{ boxMethods[o.box_return_method] }}（{{ o.boxes_issued }} 个）</el-descriptions-item>
+          <el-descriptions-item label="餐盒回收">
+            {{ boxMethods[o.box_return_method] }}（{{ o.boxes_issued }} 个）
+            <el-tag v-if="o.elder.box_policy === 'disposable'" type="warning" size="small" style="margin-left:4px">一次性餐盒</el-tag>
+            <el-tag v-else-if="o.elder.box_policy === 'paused'" type="danger" size="small" style="margin-left:4px">暂停发放</el-tag>
+          </el-descriptions-item>
           <el-descriptions-item label="特殊照护">
             <el-tag v-if="o.elder.cognitive_impairment" type="danger" size="small">认知障碍</el-tag>
             <el-tag v-if="o.elder.living_alone" type="danger" size="small" style="margin-left:4px">独居</el-tag>

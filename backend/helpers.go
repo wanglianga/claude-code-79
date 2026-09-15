@@ -17,10 +17,14 @@ func fail(c *gin.Context, code int, msg string) {
 	c.AbortWithStatusJSON(code, gin.H{"error": msg})
 }
 
-// 记录餐单状态流转事件（各方看到一致的时间线）
+// 记录餐单状态流转事件（各方看到一致的时间线）；actorID=0 表示系统动作
 func addOrderEvent(tx *sql.Tx, orderID int, actorID int, actorName, action, detail string) {
+	var aid interface{}
+	if actorID > 0 {
+		aid = actorID
+	}
 	_, _ = tx.Exec(`INSERT INTO order_events(order_id, actor_id, actor_name, action, detail) VALUES($1,$2,$3,$4,$5)`,
-		orderID, actorID, actorName, action, detail)
+		orderID, aid, actorName, action, detail)
 }
 
 // 站内通知：userID>0 指定用户；role 非空按角色广播
