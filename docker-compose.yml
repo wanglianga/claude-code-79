@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-meal}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-meal_secret}
+      POSTGRES_DB: ${DB_NAME:-mealdb}
+      TZ: Asia/Shanghai
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # 数据库不发布到宿主端口，仅在 compose 内部网络供 app 访问
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-meal}
+      DB_PASSWORD: ${DB_PASSWORD:-meal_secret}
+      DB_NAME: ${DB_NAME:-mealdb}
+      JWT_SECRET: ${JWT_SECRET:-please-change-me-in-prod}
+      PORT: "8080"
+      TZ: Asia/Shanghai
+    ports:
+      # 仅应用服务发布到宿主端口
+      - "${CC_PUBLISH_PORT}:8080"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  uploads_data:

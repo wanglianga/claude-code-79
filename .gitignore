@@ -1,0 +1,31 @@
+# Dependencies and build output
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+build/
+target/
+*.exe
+
+# Runtime data and local configuration
+.env
+.env.*
+!.env.example
+uploads/
+*.log
+*.tmp
+*.db
+
+# QA and local agent artifacts
+.playwright-cli/
+.playwright/
+playwright-report/
+test-results/
+coverage/
+memory/
+skill/
+skills/
+.claude/
+*_traces/
+trajectories/
+qa-*/
