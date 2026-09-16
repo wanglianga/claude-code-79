@@ -260,6 +260,24 @@ func (s *Server) getReconciliation(c *gin.Context) {
 	if archivedAt != nil {
 		aa = *archivedAt
 	}
+	// 冲正依据（已确认/归档档案不静默改写，保留追溯）
+	reversals := []gin.H{}
+	rr, rerr := s.db.Query(`SELECT rr.id, rr.order_id, o.order_no, rr.subsidy_amount, rr.reason,
+		COALESCE(u.name,''), rr.created_at::text
+		FROM reconciliation_reversals rr
+		JOIN orders o ON o.id=rr.order_id LEFT JOIN users u ON u.id=rr.created_by
+		WHERE rr.reconciliation_id=$1 ORDER BY rr.id`, id)
+	if rerr == nil {
+		defer rr.Close()
+		for rr.Next() {
+			var rid, oid int
+			var ono, reason, by, cat string
+			var sub float64
+			rr.Scan(&rid, &oid, &ono, &sub, &reason, &by, &cat)
+			reversals = append(reversals, gin.H{"id": rid, "order_id": oid, "order_no": ono,
+				"subsidy_amount": sub, "reason": reason, "created_by": by, "created_at": cat})
+		}
+	}
 	ok(c, gin.H{
 		"id": atoi(id), "month": month, "status": status, "total_orders": total, "signed_orders": signed,
 		"cancelled_orders": cancelled, "exception_orders": exception, "subsidy_total": subsidy,
@@ -267,7 +285,7 @@ func (s *Server) getReconciliation(c *gin.Context) {
 		"anomaly_count": anomaly, "followup_done": followup, "boxes_issued": boxesIssued,
 		"boxes_returned": boxesReturned, "recycle_rate": rate, "holiday_extra_total": hextra,
 		"note": note, "created_by": createdBy, "created_at": createdAt,
-		"confirmed_at": ca, "archived_at": aa, "items": items,
+		"confirmed_at": ca, "archived_at": aa, "items": items, "reversals": reversals,
 	})
 }
 

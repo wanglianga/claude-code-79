@@ -365,10 +365,17 @@ async function doConfirm() {
     ElMessage.warning('请填写回访对象姓名')
     return
   }
+  const denied = !confirmForm.confirms_received || confirmForm.receipt_dispute
   acting.value = true
   try {
-    await api.post(`/orders/${o.value.id}/elder-confirmation`, confirmForm)
-    ElMessage.success('老人本人/同住人回访已记录')
+    const r = await api.post(`/orders/${o.value.id}/elder-confirmation`, confirmForm)
+    if (denied) {
+      ElMessage.warning(r.effective === false
+        ? '老人否认收到：已撤销签收、转异常并阻止核销（已归档档案生成冲正依据）'
+        : '回访已记录')
+    } else {
+      ElMessage.success('老人确认收到，签收有效，纳入核销')
+    }
     confirmVisible.value = false
     await load()
   } finally { acting.value = false }

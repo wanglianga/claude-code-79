@@ -350,11 +350,11 @@ ALTER TABLE elders ADD COLUMN IF NOT EXISTS service_status TEXT NOT NULL DEFAULT
 -- 菜品食材成本（元/份），用于已备餐/已出餐未送达的食材损耗核算
 ALTER TABLE dishes ADD COLUMN IF NOT EXISTS unit_cost NUMERIC(10,2) NOT NULL DEFAULT 0;
 
--- 餐单状态补充：paused 住院/转院暂停（暂停期间不得核销补贴）
+-- 餐单状态补充：paused 住院/转院暂停；verify_pending 签收待社区核实（统一完整集合，保证幂等迁移）
 ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
 ALTER TABLE orders ADD CONSTRAINT orders_status_check CHECK (status IN
     ('pending','confirmed','preparing','ready','delivering','signed','completed','exception',
-     'cancelled','refunded','settled','paused'));
+     'cancelled','refunded','settled','paused','verify_pending'));
 
 -- 老人状态变更主表：登记 生效日期/经办人/家属确认，驱动四段拆分与各方清算
 CREATE TABLE IF NOT EXISTS elder_status_changes (
@@ -536,3 +536,17 @@ ALTER TABLE elders ADD COLUMN IF NOT EXISTS proxy_sign_authorized BOOLEAN NOT NU
 
 -- 异常责任经办人快照（补送会清空 deliveries.deliverer_id，用此列保留志愿者考核关联）
 ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS responsible_user_id INT REFERENCES users(id);
+
+-- 签收否认/核销冲正：已确认或归档的财政档案不静默改写，生成冲正依据保留追溯
+CREATE TABLE IF NOT EXISTS reconciliation_reversals (
+    id                 SERIAL PRIMARY KEY,
+    reconciliation_id  INT REFERENCES reconciliations(id),
+    order_id           INT NOT NULL REFERENCES orders(id),
+    month              TEXT NOT NULL,
+    subsidy_amount     NUMERIC(10,2) NOT NULL DEFAULT 0,
+    reason             TEXT NOT NULL DEFAULT '',
+    created_by         INT REFERENCES users(id),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_recon_reversal_order ON reconciliation_reversals(order_id);
+CREATE INDEX IF NOT EXISTS idx_recon_reversal_recon ON reconciliation_reversals(reconciliation_id);
