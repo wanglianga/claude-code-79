@@ -11,7 +11,31 @@ export const orderStatus = {
   cancelled: { text: '已取消', type: 'info' },
   refunded: { text: '已退餐退款', type: 'info' },
   settled: { text: '已核销', type: 'success' },
-  paused: { text: '暂停挂起', type: 'warning' }
+  paused: { text: '暂停挂起', type: 'warning' },
+  verify_pending: { text: '签收待社区核实', type: 'danger' }
+}
+
+export const signBasisMap = {
+  elder: { text: '老人本人签收', type: 'success' },
+  family: { text: '家属代签', type: 'success' },
+  neighbor: { text: '邻里见证', type: 'warning' },
+  photo: { text: '志愿者拍照留证', type: 'warning' },
+  community: { text: '社区核实结论', type: 'primary' }
+}
+
+export const effectivenessMap = {
+  valid: { text: '签收有效', type: 'success' },
+  pending: { text: '待社区核实', type: 'danger' },
+  invalid: { text: '核实无效', type: 'info' }
+}
+
+export const responsibleMap = {
+  volunteer: { text: '志愿者责任', type: 'warning' },
+  kitchen: { text: '厨房责任', type: 'danger' },
+  community: { text: '社区责任', type: 'info' },
+  rider: { text: '骑手责任', type: 'info' },
+  none: { text: '无责', type: 'success' },
+  '': { text: '待划分', type: 'info' }
 }
 
 export const mealTypes = { breakfast: '早餐', lunch: '午餐', dinner: '晚餐' }
@@ -40,6 +64,7 @@ export const anomalyTypes = {
   rider_timeout: '骑手超时',
   eligibility_changed: '补贴资格变更',
   meal_unsuitable: '饭菜不适合',
+  volunteer_delivery: '志愿者帮送异常',
   other: '其他异常'
 }
 

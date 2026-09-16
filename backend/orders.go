@@ -45,7 +45,8 @@ func (s *Server) listOrders(c *gin.Context) {
 	}
 	q := `SELECT o.id, o.order_no, o.elder_id, e.name, o.order_source, o.meal_date::text, o.meal_type, o.delivery_type,
 		o.total_amount, o.subsidy_amount, o.payable_amount, o.status, o.strict_mode, o.is_holiday_special, o.holiday_name,
-		o.created_at::text, COALESCE(u.name,'')
+		o.created_at::text, COALESCE(u.name,''), COALESCE(o.proxy_name,''), COALESCE(o.proxy_relation,''),
+		COALESCE(o.sign_effectiveness,''), COALESCE(o.sign_basis,'')
 		FROM orders o JOIN elders e ON e.id=o.elder_id LEFT JOIN users u ON u.id=o.created_by
 		WHERE ` + strings.Join(conds, " AND ") + ` ORDER BY o.meal_date DESC, o.id DESC LIMIT 300`
 	rows, err := s.db.Query(q, args...)
@@ -60,18 +61,22 @@ func (s *Server) listOrders(c *gin.Context) {
 			id, elderID                                          int
 			no, elderName, source, mealDate, mealType, delType   string
 			total, sub, payable                                  float64
-			status, createdAt, createdBy                         string
+			status, createdAt, createdBy, proxyName, proxyRel    string
+			signEff, signBasis                                   string
 			strict, holiday                                      bool
 			holidayName                                          string
 		)
 		rows.Scan(&id, &no, &elderID, &elderName, &source, &mealDate, &mealType, &delType,
-			&total, &sub, &payable, &status, &strict, &holiday, &holidayName, &createdAt, &createdBy)
+			&total, &sub, &payable, &status, &strict, &holiday, &holidayName, &createdAt, &createdBy,
+			&proxyName, &proxyRel, &signEff, &signBasis)
 		list = append(list, gin.H{
 			"id": id, "order_no": no, "elder_id": elderID, "elder_name": elderName, "order_source": source,
 			"meal_date": mealDate[:10], "meal_type": mealType, "delivery_type": delType,
 			"total_amount": total, "subsidy_amount": sub, "payable_amount": payable,
 			"status": status, "strict_mode": strict, "is_holiday_special": holiday, "holiday_name": holidayName,
 			"created_at": createdAt, "created_by": createdBy,
+			"proxy_name": proxyName, "proxy_relation": proxyRel,
+			"sign_effectiveness": signEff, "sign_basis": signBasis,
 		})
 	}
 	ok(c, list)
@@ -89,6 +94,10 @@ func (s *Server) createOrder(c *gin.Context) {
 		IsHolidaySpecial bool   `json:"is_holiday_special"`
 		HolidayName      string `json:"holiday_name"`
 		Notes            string `json:"notes"`
+		// 家属代订授权：与老人关系、授权方式、联系电话
+		ProxyRelation   string `json:"proxy_relation"`
+		ProxyAuthMethod string `json:"proxy_auth_method"`
+		ProxyContactPhone string `json:"proxy_contact_phone"`
 		Items            []struct {
 			DishID      int    `json:"dish_id" binding:"required"`
 			Qty         int    `json:"qty" binding:"required"`
@@ -115,6 +124,16 @@ func (s *Server) createOrder(c *gin.Context) {
 		source = "family"
 	} else if role == "elder" {
 		source = "self"
+	}
+	// 家属代订须登记与老人关系、授权方式和联系电话（代订人≠实际用餐人）
+	if source == "family" {
+		if strings.TrimSpace(req.ProxyRelation) == "" || strings.TrimSpace(req.ProxyAuthMethod) == "" {
+			fail(c, http.StatusBadRequest, "家属代订须登记与老人关系和授权方式")
+			return
+		}
+		if strings.TrimSpace(req.ProxyContactPhone) == "" {
+			// 留待从用户档案补全
+		}
 	}
 
 	tx, err := s.db.Begin()
@@ -242,14 +261,23 @@ func (s *Server) createOrder(c *gin.Context) {
 	strict := cog || alone || mob
 
 	var orderID int
+	proxyName := ""
+	if source == "family" {
+		proxyName = c.GetString("name")
+		if strings.TrimSpace(req.ProxyContactPhone) == "" {
+			_ = tx.QueryRow(`SELECT phone FROM users WHERE id=$1`, uid).Scan(&req.ProxyContactPhone)
+		}
+	}
 	err = tx.QueryRow(`INSERT INTO orders(order_no, elder_id, created_by, order_source, meal_date, meal_type, delivery_type,
 		address, need_knock_confirm, strict_mode, box_return_method, boxes_issued, total_amount, subsidy_amount,
-		holiday_extra, payable_amount, is_holiday_special, holiday_name, status, notes)
-		VALUES('TMP-'||gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'confirmed',$18)
+		holiday_extra, payable_amount, is_holiday_special, holiday_name, status, notes,
+		proxy_relation, proxy_auth_method, proxy_contact_phone, proxy_name)
+		VALUES('TMP-'||gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'confirmed',$18,$19,$20,$21,$22)
 		RETURNING id`,
 		req.ElderID, uid, source, req.MealDate, req.MealType, req.DeliveryType,
 		address, needKnock, strict, boxMethod, req.BoxesIssued, total, subsidyAmount,
-		holidayExtra, payable, req.IsHolidaySpecial, req.HolidayName, req.Notes).Scan(&orderID)
+		holidayExtra, payable, req.IsHolidaySpecial, req.HolidayName, req.Notes,
+		req.ProxyRelation, req.ProxyAuthMethod, req.ProxyContactPhone, proxyName).Scan(&orderID)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "创建餐单失败")
 		return
@@ -267,6 +295,10 @@ func (s *Server) createOrder(c *gin.Context) {
 		}
 	}
 	eventDetail := "来源：" + sourceName(source) + "；金额 " + ftoa(total) + " 元，补贴 " + ftoa(subsidyAmount) + " 元"
+	if source == "family" {
+		eventDetail += "；家属代订（与老人关系：" + req.ProxyRelation + "，授权方式：" + req.ProxyAuthMethod +
+			"，代订人：" + proxyName + "），实际用餐人为老人「" + elderName + "」"
+	}
 	if boxPolicy == "disposable" {
 		eventDetail += "；按餐盒策略改用一次性餐盒"
 	} else if boxPolicy == "paused" {
@@ -465,6 +497,43 @@ func (s *Server) getOrder(c *gin.Context) {
 			feedbacks = append(feedbacks, gin.H{"rating": r, "suitable": su, "content": co, "created_at": ca})
 		}
 	}
+	// 家属代订授权信息（代订人 ≠ 实际用餐人）
+	var proxyName, proxyRel, proxyAuth, proxyPhone, signEff, signBasis string
+	_ = s.db.QueryRow(`SELECT COALESCE(proxy_name,''), COALESCE(proxy_relation,''), COALESCE(proxy_auth_method,''),
+		COALESCE(proxy_contact_phone,''), COALESCE(sign_effectiveness,''), COALESCE(sign_basis,'')
+		FROM orders WHERE id=$1`, id).Scan(&proxyName, &proxyRel, &proxyAuth, &proxyPhone, &signEff, &signBasis)
+	// 志愿者帮送签收核验信息
+	var volOrg, volRelation, consentBy, effectiveness, effReason string
+	var informedConsent bool
+	_ = s.db.QueryRow(`SELECT COALESCE(vol_org,''), COALESCE(relation_to_elder,''), COALESCE(consent_by,''),
+		COALESCE(effectiveness,''), COALESCE(effectiveness_reason,''), COALESCE(informed_consent,FALSE)
+		FROM deliveries WHERE order_id=$1`, id).Scan(&volOrg, &volRelation, &consentBy, &effectiveness, &effReason, &informedConsent)
+	if delivery != nil {
+		delivery["vol_org"] = volOrg
+		delivery["relation_to_elder"] = volRelation
+		delivery["consent_by"] = consentBy
+		delivery["informed_consent"] = informedConsent
+		delivery["effectiveness"] = effectiveness
+		delivery["effectiveness_reason"] = effReason
+	}
+	// 老人本人/同住人回访（家属代订不得代老人放弃权益）
+	confirmations := []gin.H{}
+	cfrows, _ := s.db.Query(`SELECT COALESCE(u.name,''), ec.confirmer_role, ec.confirmer_name, ec.method,
+		ec.confirms_received, ec.taste_feedback, ec.body_discomfort, ec.receipt_dispute, ec.note, ec.created_at::text
+		FROM elder_confirmations ec LEFT JOIN users u ON u.id=ec.community_id
+		WHERE ec.order_id=$1 ORDER BY ec.id`, id)
+	if cfrows != nil {
+		defer cfrows.Close()
+		for cfrows.Next() {
+			var by, role, name2, method, feedback, note2, cat string
+			var received, unwell, dispute bool
+			cfrows.Scan(&by, &role, &name2, &method, &received, &feedback, &unwell, &dispute, &note2, &cat)
+			confirmations = append(confirmations, gin.H{"community_by": by, "confirmer_role": role,
+				"confirmer_name": name2, "method": method, "confirms_received": received,
+				"taste_feedback": feedback, "body_discomfort": unwell, "receipt_dispute": dispute,
+				"note": note2, "created_at": cat})
+		}
+	}
 	ok(c, gin.H{
 		"id": atoi(id), "order_no": o.OrderNo, "status": o.Status,
 		"elder": gin.H{"id": o.ElderID, "name": elderName, "phone": elderPhone, "address": elderAddr,
@@ -479,8 +548,12 @@ func (s *Server) getOrder(c *gin.Context) {
 		"notes": o.Notes, "cancel_reason": o.CancelReason,
 		"batch_id": o.BatchID.Int64, "settled_in": o.SettledIn.Int64,
 		"created_at": o.CreatedAt, "updated_at": o.UpdatedAt,
+		"proxy": gin.H{"name": proxyName, "relation": proxyRel, "auth_method": proxyAuth, "contact_phone": proxyPhone},
+		"sign_effectiveness": signEff, "sign_basis": signBasis,
+		"sign_basis_name": signBasisName(signBasis), "effectiveness_name": effectivenessName(signEff),
 		"items": items, "delivery": delivery, "events": events, "anomalies": anomalies,
 		"box_record": box, "feedbacks": feedbacks, "contact_attempts": contactAttempts,
+		"elder_confirmations": confirmations,
 	})
 }
 

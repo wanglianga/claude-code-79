@@ -80,6 +80,7 @@ const allMenus = [
   { path: '/anomalies', title: '异常工单', icon: 'WarningFilled', roles: null },
   { path: '/status-changes', title: '状态变更清算', icon: 'Switch', roles: null },
   { path: '/boxes', title: '餐盒回收', icon: 'Refresh', roles: ['community', 'admin', 'finance'] },
+  { path: '/volunteers-manage', title: '志愿者资质考核', icon: 'Avatar', roles: ['community', 'admin'] },
   { path: '/finance', title: '财政核销', icon: 'Money', roles: ['finance', 'admin'] },
   { path: '/subsidy-changes', title: '补贴变更记录', icon: 'Document', roles: ['finance', 'admin', 'community'] },
   { path: '/dishes', title: '菜品管理', icon: 'Dish', roles: ['kitchen', 'admin'] },

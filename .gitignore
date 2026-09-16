@@ -11,6 +11,11 @@ target/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*secret*
+*token*
+*credential*
 uploads/
 *.log
 *.tmp

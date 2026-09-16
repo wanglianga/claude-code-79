@@ -56,6 +56,33 @@
         <el-form-item label="备注">
           <el-input v-model="form.notes" placeholder="如：饭量减半、门口鞋柜上取餐等" />
         </el-form-item>
+
+        <!-- 家属代订授权：代订人 ≠ 实际用餐人 -->
+        <template v-if="store.role === 'family'">
+          <el-divider content-position="left">家属代订授权（实际用餐人为老人本人）</el-divider>
+          <el-form-item label="与老人关系" required>
+            <el-select v-model="form.proxy_relation" style="width:220px">
+              <el-option label="子女" value="子女" />
+              <el-option label="配偶" value="配偶" />
+              <el-option label="孙辈" value="孙辈" />
+              <el-option label="其他亲属" value="其他亲属" />
+              <el-option label="监护人" value="监护人" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="授权方式" required>
+            <el-radio-group v-model="form.proxy_auth_method">
+              <el-radio value="电话授权">电话授权</el-radio>
+              <el-radio value="书面授权">书面授权</el-radio>
+              <el-radio value="长期绑定授权">长期绑定授权</el-radio>
+              <el-radio value="当面确认">当面确认</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="代订人电话">
+            <el-input v-model="form.proxy_contact_phone" placeholder="代订人联系电话（默认取账号手机号）" style="width:240px" />
+          </el-form-item>
+          <el-alert type="info" :closable="false" show-icon
+            title="代订可代为确认菜单、禁忌、补贴资格与自费金额；但口味反馈、身体不适与签收异常，社区仍将回访老人本人或同住人，代订人不能代老人放弃权益。自费账单同步家属端与老人端。" />
+        </template>
       </el-form>
     </div>
 
@@ -126,7 +153,10 @@ const form = reactive({
   delivery_type: 'home',
   is_holiday_special: false,
   holiday_name: '',
-  notes: ''
+  notes: '',
+  proxy_relation: '',
+  proxy_auth_method: '',
+  proxy_contact_phone: ''
 })
 
 const elder = computed(() => elders.value.find((e) => e.id === form.elder_id) || null)
@@ -155,6 +185,10 @@ async function submit() {
     .filter((d) => (qty[d.id] || 0) > 0)
     .map((d) => ({ dish_id: d.id, qty: qty[d.id], custom_note: notes[d.id] || '' }))
   if (items.length === 0) return
+  if (store.role === 'family' && (!form.proxy_relation || !form.proxy_auth_method)) {
+    ElMessage.warning('家属代订须登记与老人关系和授权方式')
+    return
+  }
   if (form.is_holiday_special && !form.holiday_name) {
     ElMessage.warning('请填写节日名称')
     return

@@ -110,6 +110,17 @@ func main() {
 		auth.POST("/notifications/read-all", s.readAllNotifications)
 
 		auth.GET("/volunteers", s.requireRole("community", "admin"), s.listVolunteers)
+		// 志愿者资质/健康/帮送签收效力与责任划分
+		auth.GET("/volunteers/manage", s.requireRole("community", "admin"), s.listVolunteerManage)
+		auth.PUT("/volunteers/:id", s.requireRole("community", "admin"), s.updateVolunteer)
+		auth.GET("/volunteer/dispatch-status", s.requireRole("volunteer"), s.volunteerDispatchStatus)
+		auth.POST("/volunteer/health-checkin", s.requireRole("volunteer"), s.volunteerHealthCheckin)
+		auth.POST("/delivery/:id/volunteer-pickup", s.requireRole("volunteer"), s.volunteerPickup)
+		auth.POST("/delivery/:id/volunteer-deliver", s.requireRole("volunteer"), s.volunteerDeliver)
+		auth.POST("/delivery/:id/volunteer-exception", s.requireRole("volunteer"), s.volunteerReportException)
+		auth.POST("/delivery/:id/verify-sign", s.requireRole("community", "admin"), s.verifyVolunteerSign)
+		auth.POST("/anomalies/:id/investigate", s.requireRole("community", "admin"), s.investigateAnomaly)
+		auth.POST("/orders/:id/elder-confirmation", s.requireRole("community", "admin"), s.elderConfirmation)
 
 		auth.GET("/admin/users", s.requireRole("admin"), s.listUsers)
 		auth.POST("/admin/users", s.requireRole("admin"), s.createUser)

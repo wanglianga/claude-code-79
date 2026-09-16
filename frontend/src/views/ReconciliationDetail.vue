@@ -63,6 +63,14 @@
               <el-tag :type="row.included ? 'success' : 'info'" size="small">{{ row.included ? '发放' : '不发放' }}</el-tag>
             </template>
           </el-table-column>
+          <el-table-column label="真实签收依据" width="150">
+            <template #default="{ row }">
+              <el-tag v-if="row.sign_basis" :type="(signBasisMap[row.sign_basis]||{}).type||'info'" size="small">
+                {{ row.sign_basis_name || signBasisMap[row.sign_basis]?.text }}
+              </el-tag>
+              <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="reason" label="判定依据" min-width="180" />
         </el-table>
       </div>
@@ -75,7 +83,7 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
-import { recStatus, orderStatus, fmtTime, fmtMoney } from '../utils'
+import { recStatus, orderStatus, signBasisMap, fmtTime, fmtMoney } from '../utils'
 
 const route = useRoute()
 const router = useRouter()

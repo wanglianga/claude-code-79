@@ -672,14 +672,122 @@ func seed(db *sql.DB) error {
 			"unprepared":           "未备餐取消，停止配送与补贴核销",
 		}, map[string]bool{"in_transit": true, "prepared_undelivered": true})
 
+	// ====================================================================
+	// 志愿者帮送与家属代订演示
+	// ====================================================================
+	// 志愿者资质：陈志愿已核验、已培训、正常；新增一名未培训志愿者用于拦截演示
+	if _, err := db.Exec(`UPDATE users SET vol_org='康乐社区助老志愿队', vol_id_verified=TRUE,
+		vol_trained=TRUE, vol_training_date=CURRENT_DATE-30, vol_eligible=TRUE WHERE username='volunteer01'`); err != nil {
+		return err
+	}
+	db.Exec(`INSERT INTO volunteer_health(volunteer_id, check_date, health_status, temperature, note)
+		VALUES($1,CURRENT_DATE,'healthy',36.4,'健康打卡') ON CONFLICT DO NOTHING`, uid["volunteer01"])
+	var vol2 int
+	db.QueryRow(`INSERT INTO users(username,password_hash,name,phone,role,vol_org,vol_id_verified,vol_trained,vol_eligible)
+		VALUES('volunteer02',$1,'周志愿','13800005555','volunteer','外部公益组织',TRUE,FALSE,FALSE) RETURNING id`,
+		hashPassword("volunteer123")).Scan(&vol2)
+
+	// 授权陈福生可采用邻里见证/拍照留证（非严格对象）
+	db.Exec(`UPDATE elders SET proxy_sign_authorized=TRUE WHERE name='陈福生'`)
+
+	// 专用批次（昨日，已出餐）
+	vBatchDate := day(-1)
+	var vBatch int
+	db.QueryRow(`INSERT INTO kitchen_batches(batch_date, meal_type, batch_no, status, released_at, operator_id)
+		VALUES($1::date,'lunch',$2,'released',now(),$3) RETURNING id`,
+		vBatchDate, "B"+replaceDash(vBatchDate)+"-lunch-vol", uid["kitchen01"]).Scan(&vBatch)
+
+	insertVolOrder := func(date, status, elderName string, items []itemSpec) int {
+		oid, err := insertOrder(elderName, date, "lunch", "volunteer", status, "community", "community01", items, false, "")
+		if err != nil {
+			return 0
+		}
+		db.Exec(`UPDATE orders SET batch_id=$2 WHERE id=$1`, oid, vBatch)
+		return oid
+	}
+	dSelf, dFam, dNb, dPhoto, dSpill := day(-6), day(-5), day(-4), day(0), day(-3)
+	// ① 老人本人签收（有效）
+	oidSelf := insertVolOrder(dSelf, "signed", "陈福生", []itemSpec{{"番茄炒蛋", 1, ""}, {"软米饭", 1, ""}})
+	db.Exec(`UPDATE orders SET sign_basis='elder', sign_effectiveness='valid' WHERE id=$1`, oidSelf)
+	db.Exec(`INSERT INTO deliveries(order_id, deliverer_id, deliverer_type, thermal_box_no, route_info, status,
+		pickup_time, delivered_time, sign_type, signed_by_name, knock_confirmed, vol_org, relation_to_elder,
+		informed_consent, consent_by, dispatch_checked, eta, effectiveness, effectiveness_reason, community_verified_by, community_verified_at)
+		VALUES($1,$2,'volunteer','WBX-V1','社区食堂→幸福里','delivered',$3::timestamptz,$4::timestamptz,'elder','陈福生',TRUE,
+		'康乐社区助老志愿队','邻里',TRUE,'陈福生',TRUE,$3::timestamptz,'valid','老人本人签收，签收有效',$5,now())`,
+		oidSelf, uid["volunteer01"], dSelf+" 11:05:00", dSelf+" 11:35:00", uid["community01"])
+	db.Exec(`INSERT INTO elder_confirmations(order_id, elder_id, confirmer_role, confirmer_name, method, confirms_received, taste_feedback, community_id)
+		VALUES($1,$2,'elder','陈福生','visit',TRUE,'味道合适，分量足',$3)`, oidSelf, eid["陈福生"], uid["community01"])
+
+	// ② 家属代签（有效）
+	oidFam := insertVolOrder(dFam, "signed", "陈福生", []itemSpec{{"清蒸鲈鱼", 1, ""}, {"软米饭", 1, ""}})
+	db.Exec(`UPDATE orders SET sign_basis='family', sign_effectiveness='valid' WHERE id=$1`, oidFam)
+	db.Exec(`INSERT INTO deliveries(order_id, deliverer_id, deliverer_type, thermal_box_no, route_info, status,
+		pickup_time, delivered_time, sign_type, signed_by_name, knock_confirmed, vol_org, relation_to_elder,
+		informed_consent, consent_by, dispatch_checked, eta, effectiveness, effectiveness_reason)
+		VALUES($1,$2,'volunteer','WBX-V1','社区食堂→幸福里','delivered',$3::timestamptz,$4::timestamptz,'family','陈邻居(侄子)',TRUE,
+		'康乐社区助老志愿队','邻里',TRUE,'陈邻居',TRUE,$3::timestamptz,'valid','家属代签，签收有效')`,
+		oidFam, uid["volunteer01"], dFam+" 11:05:00", dFam+" 11:40:00")
+
+	// ③ 邻里见证，已授权+知情，社区已回访核实（有效，依据 community）
+	oidNb := insertVolOrder(dNb, "signed", "陈福生", []itemSpec{{"番茄炒蛋", 1, ""}, {"无糖南瓜粥", 1, ""}})
+	db.Exec(`UPDATE orders SET sign_basis='community', sign_effectiveness='valid' WHERE id=$1`, oidNb)
+	db.Exec(`INSERT INTO deliveries(order_id, deliverer_id, deliverer_type, thermal_box_no, route_info, status,
+		pickup_time, delivered_time, sign_type, signed_by_name, knock_confirmed, witness_name, witness_phone,
+		vol_org, relation_to_elder, informed_consent, consent_by, dispatch_checked, eta,
+		effectiveness, effectiveness_reason, community_verified_by, community_verified_at)
+		VALUES($1,$2,'volunteer','WBX-V1','社区食堂→幸福里','delivered',$3::timestamptz,$4::timestamptz,'neighbor','赵阿姨',TRUE,'赵阿姨','13800006677',
+		'康乐社区助老志愿队','同楼栋住户',TRUE,'赵阿姨',TRUE,$3::timestamptz,
+		'valid','社区授权且知情的邻里见证，回访老人确认收到',$5,now())`,
+		oidNb, uid["volunteer01"], dNb+" 11:05:00", dNb+" 11:42:00", uid["community01"])
+	db.Exec(`INSERT INTO elder_confirmations(order_id, elder_id, confirmer_role, confirmer_name, method, confirms_received, taste_feedback, community_id)
+		VALUES($1,$2,'elder','陈福生','phone',TRUE,'收到了，粥很好',$3)`, oidNb, eid["陈福生"], uid["community01"])
+
+	// ④ 拍照留证，待社区核实（verify_pending，不核销）+ 待核实异常
+	oidPhoto := insertVolOrder(dPhoto, "verify_pending", "陈福生", []itemSpec{{"软烂红烧肉", 1, ""}, {"软米饭", 1, ""}})
+	db.Exec(`UPDATE orders SET sign_basis='photo', sign_effectiveness='pending' WHERE id=$1`, oidPhoto)
+	db.Exec(`INSERT INTO deliveries(order_id, deliverer_id, deliverer_type, thermal_box_no, route_info, status,
+		pickup_time, delivered_time, sign_type, signed_by_name, sign_photo_url, knock_confirmed,
+		vol_org, relation_to_elder, informed_consent, consent_by, dispatch_checked, eta, effectiveness, effectiveness_reason)
+		VALUES($1,$2,'volunteer','WBX-V1','社区食堂→幸福里','delivered',$3::timestamptz,now(),'photo','志愿者拍照留证','/uploads/demo-volunteer.jpg',FALSE,
+		'康乐社区助老志愿队','同楼栋住户',TRUE,'电话联系老人同意',TRUE,$3::timestamptz,
+		'pending','志愿者拍照留证不能仅凭自述核销，须社区核实老人实际收到')`,
+		oidPhoto, uid["volunteer01"], dPhoto+" 11:06:00")
+	var oidPhotoNo string
+	db.QueryRow(`SELECT order_no FROM orders WHERE id=$1`, oidPhoto).Scan(&oidPhotoNo)
+	db.Exec(`INSERT INTO anomalies(order_id, elder_id, type, priority, description, reported_by)
+		VALUES($1,$2,'volunteer_delivery','normal',$3,$4)`,
+		oidPhoto, eid["陈福生"],
+		"志愿者帮送餐单 "+oidPhotoNo+" 采用拍照留证，效力待社区核实：需回访老人本人确认实际收到，核实前不纳入补贴核销。",
+		uid["community01"])
+
+	// ⑤ 志愿者帮送异常（餐品洒漏，待社区核实，责任未划分）
+	oidSpill := insertVolOrder(dSpill, "exception", "陈福生", []itemSpec{{"低盐时蔬", 1, ""}, {"软米饭", 1, ""}})
+	var spillNo string
+	db.QueryRow(`SELECT order_no FROM orders WHERE id=$1`, oidSpill).Scan(&spillNo)
+	db.Exec(`INSERT INTO deliveries(order_id, deliverer_id, deliverer_type, thermal_box_no, route_info, status,
+		pickup_time, anomaly_note, vol_org, relation_to_elder, informed_consent, consent_by, dispatch_checked, eta)
+		VALUES($1,$2,'volunteer','WBX-V1','社区食堂→幸福里','failed',$3::timestamptz,'志愿者帮送异常·餐品洒漏：途中颠簸菜汤洒出','康乐社区助老志愿队','邻里',TRUE,'陈福生',TRUE,$3::timestamptz)`,
+		oidSpill, uid["volunteer01"], dSpill+" 11:06:00")
+	db.Exec(`INSERT INTO anomalies(order_id, elder_id, type, priority, description, reported_by, food_safety, responsible_user_id)
+		VALUES($1,$2,'volunteer_delivery','normal',$3,$4,FALSE,$5)`,
+		oidSpill, eid["陈福生"],
+		"志愿者帮送异常【餐品洒漏】餐单 "+spillNo+"（老人「陈福生」）途中菜汤洒出，请社区核实路线/取餐时间/照片后决定补送或退餐并划分责任。",
+		uid["volunteer01"], uid["volunteer01"])
+
+	// 家属代订授权：把张秀英今日 confirmed 单补上代订授权三字段（其家属 family01 张强代订）
+	db.Exec(`UPDATE orders SET proxy_relation='子女', proxy_auth_method='长期绑定授权', proxy_contact_phone='13800001111',
+		proxy_name='张强' WHERE elder_id=$1 AND order_source='family' AND proxy_name=''`, eid["张秀英"])
+
 	// ---------- 通知 ----------
 	db.Exec(`INSERT INTO notifications(role, title, content) VALUES
 		('kitchen', '今日待备餐', '今日有 4 份已确认餐单等待创建批次备餐'),
 		('community', '餐盒未回收提醒', '张秀英 2 个餐盒未回收，已生成异常工单'),
 		('community', '住院暂停四段清算', '孙桂英住院暂停，已按四段拆分餐单，请跟进已备餐转配'),
-		('finance', '本月核销提醒', '本月已有多笔签收餐单，月底请生成核销单'),
+		('community', '帮送签收待核实', '陈福生今日拍照留证签收待回访老人本人，核实前不核销'),
+		('volunteer', '当日健康打卡', '开始帮送前请完成发车前核验（身份/培训/健康/资格）'),
+		('finance', '本月核销提醒', '本月已有多笔签收餐单，月底请生成核销单；每笔可见真实签收依据'),
 		('finance', '去世清算', '刘德海去世已清算：保留已签收，未出餐不结算，已出餐未送达记食材损耗')`)
 
-	log.Printf("种子数据完成：用户 %d，老人 %d，菜品 %d，上月归档核销 #%d", len(users), len(elders), len(dishes), recID)
+	log.Printf("种子数据完成：用户 %d，老人 %d，菜品 %d，上月归档核销 #%d", len(users)+1, len(elders), len(dishes), recID)
 	return nil
 }

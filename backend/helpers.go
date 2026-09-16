@@ -147,7 +147,25 @@ func anomalyTypeName(t string) string {
 		return "补贴资格变更"
 	case "meal_unsuitable":
 		return "饭菜不适合"
+	case "volunteer_delivery":
+		return "志愿者帮送异常"
 	default:
 		return "其他异常"
 	}
+}
+
+func responsiblePartyName(p string) string {
+	switch p {
+	case "rider":
+		return "骑手"
+	case "volunteer":
+		return "志愿者"
+	case "kitchen":
+		return "厨房"
+	case "community":
+		return "社区"
+	case "none":
+		return "无责"
+	}
+	return "待划分"
 }

@@ -437,3 +437,102 @@ CREATE INDEX IF NOT EXISTS idx_status_change_items_order ON status_change_items(
 
 -- 在途餐单补贴冻结：住院/转院暂停或终止时，骑手已取餐未签收的餐单暂不核销，待异常办结（签收/退餐）后处理
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS subsidy_frozen BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- ====================================================================
+-- 志愿者帮送与家属代订：签收效力、责任划分、本人回访、核销依据
+-- ====================================================================
+
+-- 志愿者资质（挂在 users 上，role='volunteer'）
+ALTER TABLE users ADD COLUMN IF NOT EXISTS vol_org TEXT NOT NULL DEFAULT '';          -- 所属社区或组织
+ALTER TABLE users ADD COLUMN IF NOT EXISTS vol_id_verified BOOLEAN NOT NULL DEFAULT FALSE; -- 身份是否核验
+ALTER TABLE users ADD COLUMN IF NOT EXISTS vol_trained BOOLEAN NOT NULL DEFAULT FALSE;     -- 是否经过助餐培训
+ALTER TABLE users ADD COLUMN IF NOT EXISTS vol_training_date DATE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS vol_eligible BOOLEAN NOT NULL DEFAULT TRUE;    -- 帮送资格（可暂停）
+ALTER TABLE users ADD COLUMN IF NOT EXISTS vol_suspend_reason TEXT NOT NULL DEFAULT '';
+
+-- 志愿者当日健康打卡（发车前核验）
+CREATE TABLE IF NOT EXISTS volunteer_health (
+    id            SERIAL PRIMARY KEY,
+    volunteer_id  INT NOT NULL REFERENCES users(id),
+    check_date    DATE NOT NULL,
+    health_status TEXT NOT NULL DEFAULT 'healthy' CHECK (health_status IN ('healthy','unwell')),
+    temperature   NUMERIC(4,1) NOT NULL DEFAULT 36.5,
+    note          TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (volunteer_id, check_date)
+);
+
+-- 家属代订授权（代订人≠实际用餐人）
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS proxy_relation TEXT NOT NULL DEFAULT '';       -- 代订人与老人关系
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS proxy_auth_method TEXT NOT NULL DEFAULT '';    -- 授权方式
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS proxy_contact_phone TEXT NOT NULL DEFAULT '';  -- 代订人联系电话
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS proxy_name TEXT NOT NULL DEFAULT '';           -- 代订人姓名快照
+-- 签收效力与依据：valid 有效 / pending 待社区核实 / invalid 经核实无效
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS sign_effectiveness TEXT NOT NULL DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS sign_basis TEXT NOT NULL DEFAULT '';           -- self/family/neighbor/photo/community
+
+-- 配送记录补充志愿者帮送核验与签收留痕
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS vol_org TEXT NOT NULL DEFAULT '';          -- 所属组织快照
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS relation_to_elder TEXT NOT NULL DEFAULT '';-- 志愿者与老人关系
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS informed_consent BOOLEAN NOT NULL DEFAULT FALSE; -- 老人/家属是否知情同意
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS consent_by TEXT NOT NULL DEFAULT '';       -- 同意人（老人本人/家属姓名）
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS dispatch_checked BOOLEAN NOT NULL DEFAULT FALSE; -- 发车前五项核验通过
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS eta TIMESTAMPTZ;                           -- 预计送达时间
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS witness_name TEXT NOT NULL DEFAULT '';     -- 邻里见证人姓名
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS witness_phone TEXT NOT NULL DEFAULT '';
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS effectiveness TEXT NOT NULL DEFAULT '';    -- valid/pending/invalid
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS effectiveness_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS community_verified_by INT REFERENCES users(id);
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS community_verified_at TIMESTAMPTZ;
+
+-- 放宽签收方式：本人/家属代签/社区/志愿者/邻里见证/拍照留证
+ALTER TABLE deliveries DROP CONSTRAINT IF EXISTS deliveries_sign_type_check;
+ALTER TABLE deliveries ADD CONSTRAINT deliveries_sign_type_check CHECK
+    (sign_type IN ('','elder','family','community','volunteer','neighbor','photo'));
+
+-- 餐单状态补充：签收待社区核实（邻里见证/拍照留证，未核实前不核销）
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
+ALTER TABLE orders ADD CONSTRAINT orders_status_check CHECK (status IN
+    ('pending','confirmed','preparing','ready','delivering','signed','completed','exception',
+     'cancelled','refunded','settled','paused','verify_pending'));
+
+-- 异常工单补充：帮送责任划分与社区核实结论
+ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS responsible_party TEXT NOT NULL DEFAULT ''
+    CHECK (responsible_party IN ('','rider','volunteer','kitchen','community','elder','none'));
+ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS food_safety BOOLEAN NOT NULL DEFAULT FALSE;  -- 涉及食品安全
+ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS elder_unwell BOOLEAN NOT NULL DEFAULT FALSE;-- 老人身体不适
+ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS investigation TEXT NOT NULL DEFAULT '';     -- 社区核实记录
+ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS outcome TEXT NOT NULL DEFAULT '';            -- redeliver/refund/resign/none
+-- 异常类型补充：志愿者帮送异常（洒漏/迟到/送错/否认收到）
+ALTER TABLE anomalies DROP CONSTRAINT IF EXISTS anomalies_type_check;
+ALTER TABLE anomalies ADD CONSTRAINT anomalies_type_check CHECK (type IN
+    ('no_answer','box_not_returned','family_change','kitchen_shortage','rider_timeout',
+     'eligibility_changed','meal_unsuitable','other','volunteer_delivery'));
+
+-- 老人本人/同住人回访（家属代订不得代老人放弃权益；签收核实以本人陈述为准）
+CREATE TABLE IF NOT EXISTS elder_confirmations (
+    id                SERIAL PRIMARY KEY,
+    order_id          INT NOT NULL REFERENCES orders(id),
+    elder_id          INT NOT NULL REFERENCES elders(id),
+    confirmer_role    TEXT NOT NULL DEFAULT 'elder' CHECK (confirmer_role IN ('elder','cohabitant')),
+    confirmer_name    TEXT NOT NULL DEFAULT '',
+    method            TEXT NOT NULL DEFAULT 'phone' CHECK (method IN ('phone','visit','onsite')),
+    confirms_received BOOLEAN NOT NULL DEFAULT TRUE,   -- 确认实际收到/用餐
+    taste_feedback    TEXT NOT NULL DEFAULT '',        -- 口味反馈
+    body_discomfort   BOOLEAN NOT NULL DEFAULT FALSE,  -- 身体不适
+    receipt_dispute   BOOLEAN NOT NULL DEFAULT FALSE,  -- 否认收到/签收异常
+    note              TEXT NOT NULL DEFAULT '',
+    community_id      INT REFERENCES users(id),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_elder_confirm_order ON elder_confirmations(order_id);
+
+-- 核销明细补充真实签收依据
+ALTER TABLE reconciliation_items ADD COLUMN IF NOT EXISTS sign_basis TEXT NOT NULL DEFAULT '';
+ALTER TABLE reconciliation_items ADD COLUMN IF NOT EXISTS sign_effectiveness TEXT NOT NULL DEFAULT '';
+
+-- 社区是否授权该老人可采用邻里见证/志愿者拍照留证签收（认知障碍等严格对象不适用）
+ALTER TABLE elders ADD COLUMN IF NOT EXISTS proxy_sign_authorized BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- 异常责任经办人快照（补送会清空 deliveries.deliverer_id，用此列保留志愿者考核关联）
+ALTER TABLE anomalies ADD COLUMN IF NOT EXISTS responsible_user_id INT REFERENCES users(id);

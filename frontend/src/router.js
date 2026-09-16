@@ -17,6 +17,7 @@ const routes = [
       { path: 'delivery', component: () => import('./views/Delivery.vue'), meta: { title: '配送任务', roles: ['rider', 'volunteer'] } },
       { path: 'anomalies', component: () => import('./views/Anomalies.vue'), meta: { title: '异常工单' } },
       { path: 'boxes', component: () => import('./views/Boxes.vue'), meta: { title: '餐盒回收', roles: ['community', 'admin', 'finance'] } },
+      { path: 'volunteers-manage', component: () => import('./views/VolunteersManage.vue'), meta: { title: '志愿者资质考核', roles: ['community', 'admin'] } },
       { path: 'finance', component: () => import('./views/Finance.vue'), meta: { title: '财政核销', roles: ['finance', 'admin'] } },
       { path: 'finance/:id', component: () => import('./views/ReconciliationDetail.vue'), meta: { title: '核销详情', roles: ['finance', 'admin'] } },
       { path: 'subsidy-changes', component: () => import('./views/SubsidyChanges.vue'), meta: { title: '补贴变更记录', roles: ['finance', 'admin', 'community'] } },

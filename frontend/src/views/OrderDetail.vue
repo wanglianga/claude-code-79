@@ -20,6 +20,16 @@
           </el-descriptions-item>
           <el-descriptions-item label="紧急联系人">{{ o.elder.emergency_contact_name }} {{ o.elder.emergency_contact_phone }}</el-descriptions-item>
           <el-descriptions-item label="下单来源">{{ orderSources[o.order_source] }}</el-descriptions-item>
+          <el-descriptions-item v-if="o.proxy && o.proxy.name" label="家属代订">
+            <el-tag type="warning" size="small">代订人：{{ o.proxy.name }}（{{ o.proxy.relation }}·{{ o.proxy.auth_method }}）</el-tag>
+            <div class="muted" style="font-size:12px">实际用餐人：{{ o.elder.name }}；{{ o.proxy.contact_phone }}</div>
+          </el-descriptions-item>
+          <el-descriptions-item v-if="o.sign_basis" label="签收依据">
+            <el-tag :type="(signBasisMap[o.sign_basis]||{}).type||'info'" size="small">{{ o.sign_basis_name }}</el-tag>
+            <el-tag v-if="o.sign_effectiveness" :type="(effectivenessMap[o.sign_effectiveness]||{}).type||'info'" size="small" style="margin-left:4px">
+              {{ o.effectiveness_name }}
+            </el-tag>
+          </el-descriptions-item>
           <el-descriptions-item label="敲门确认">{{ o.need_knock_confirm ? '需要' : '不需要' }}</el-descriptions-item>
           <el-descriptions-item label="餐盒回收">
             {{ boxMethods[o.box_return_method] }}（{{ o.boxes_issued }} 个）
@@ -50,7 +60,37 @@
           <el-button v-if="canCancel" type="danger" plain @click="cancelVisible = true">退餐/取消</el-button>
           <el-button v-if="canPickupConfirm" type="primary" @click="pickupVisible = true">现场取餐签收</el-button>
           <el-button v-if="canFeedback" type="success" plain @click="feedbackVisible = true">用餐反馈</el-button>
+          <el-button v-if="canConfirm" type="primary" plain @click="confirmVisible = true">回访老人本人/核实签收</el-button>
         </div>
+      </div>
+
+      <!-- 志愿者帮送核验与签收效力 -->
+      <div v-if="o.delivery && (o.delivery.deliverer_type==='volunteer' || o.delivery.effectiveness)" class="page-card">
+        <h3 class="page-title">志愿者帮送与签收效力</h3>
+        <el-descriptions :column="2" border size="small">
+          <el-descriptions-item label="所属组织">{{ o.delivery.vol_org || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="与老人关系">{{ o.delivery.relation_to_elder || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="知情同意">{{ o.delivery.informed_consent ? ('已同意（'+o.delivery.consent_by+'）') : '—' }}</el-descriptions-item>
+          <el-descriptions-item label="签收效力">
+            <el-tag :type="(effectivenessMap[o.delivery.effectiveness]||{}).type||'info'" size="small">
+              {{ effectivenessName(o.delivery.effectiveness) }}
+            </el-tag>
+            <span class="muted" style="margin-left:6px">{{ o.delivery.effectiveness_reason }}</span>
+          </el-descriptions-item>
+        </el-descriptions>
+      </div>
+
+      <!-- 老人本人/同住人回访 -->
+      <div v-if="o.elder_confirmations && o.elder_confirmations.length" class="page-card">
+        <h3 class="page-title">老人本人/同住人回访（代订不得代老人放弃权益）</h3>
+        <el-timeline>
+          <el-timeline-item v-for="(c, i) in o.elder_confirmations" :key="i" :timestamp="fmtTime(c.created_at)">
+            <el-tag size="small" :type="c.confirms_received?'success':'danger'">{{ c.confirmer_role==='elder'?'老人本人':'同住人' }}·{{ c.confirms_received?'确认收到用餐':'否认/异常' }}</el-tag>
+            <el-tag v-if="c.body_discomfort" type="danger" size="small" effect="dark" style="margin-left:4px">身体不适</el-tag>
+            <span style="margin-left:6px">{{ c.confirmer_name }}（{{ {phone:'电话',visit:'上门',onsite:'现场'}[c.method] }}）</span>
+            <div class="muted">口味：{{ c.taste_feedback || '—' }}；{{ c.note }}</div>
+          </el-timeline-item>
+        </el-timeline>
       </div>
 
       <el-row :gutter="16">
@@ -218,6 +258,47 @@
           <el-button type="primary" :loading="acting" @click="doFeedback">提交反馈</el-button>
         </template>
       </el-dialog>
+
+      <!-- 回访老人本人/同住人或核实签收 -->
+      <el-dialog v-model="confirmVisible" title="回访老人本人/同住人 · 核实签收" width="520px">
+        <el-alert type="warning" :closable="false" show-icon class="mb-12"
+          title="家属代订不得代老人放弃权益；口味、身体不适与签收异常须回访老人本人或同住人。待核实签收凭回访结论生效或退餐。" />
+        <el-form label-width="110px">
+          <el-form-item label="回访对象" required>
+            <el-radio-group v-model="confirmForm.confirmer_role">
+              <el-radio value="elder">老人本人</el-radio>
+              <el-radio value="cohabitant">同住人</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="姓名" required>
+            <el-input v-model="confirmForm.confirmer_name" />
+          </el-form-item>
+          <el-form-item label="回访方式">
+            <el-radio-group v-model="confirmForm.method">
+              <el-radio value="phone">电话</el-radio>
+              <el-radio value="visit">上门</el-radio>
+              <el-radio value="onsite">现场</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="实际收到用餐">
+            <el-switch v-model="confirmForm.confirms_received" active-text="确认收到并用餐" inactive-text="否认收到" />
+          </el-form-item>
+          <el-form-item label="口味反馈">
+            <el-input v-model="confirmForm.taste_feedback" placeholder="老人本人对口味/软硬度的反馈" />
+          </el-form-item>
+          <el-form-item label="异常标记">
+            <el-checkbox v-model="confirmForm.body_discomfort">用餐后身体不适</el-checkbox>
+            <el-checkbox v-model="confirmForm.receipt_dispute">签收异常/否认收到</el-checkbox>
+          </el-form-item>
+          <el-form-item label="备注">
+            <el-input v-model="confirmForm.note" type="textarea" :rows="2" />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="confirmVisible=false">取消</el-button>
+          <el-button type="primary" :loading="acting" @click="doConfirm">提交回访</el-button>
+        </template>
+      </el-dialog>
     </template>
   </div>
 </template>
@@ -230,8 +311,9 @@ import api from '../api'
 import { store } from '../store'
 import {
   orderStatus, mealTypes, deliveryTypes, orderSources, boxMethods, boxStatus,
-  anomalyStatus, deliveryStatus, fmtTime, fmtMoney
+  anomalyStatus, deliveryStatus, signBasisMap, effectivenessMap, fmtTime, fmtMoney
 } from '../utils'
+const effectivenessName = (e) => ({ valid: '有效', pending: '待社区核实', invalid: '核实无效' }[e] || '—')
 
 const route = useRoute()
 const o = ref(null)
@@ -265,6 +347,32 @@ const canFeedback = computed(() =>
   o.value && ['signed', 'completed'].includes(o.value.status) &&
   ['family', 'elder', 'community', 'admin'].includes(store.role)
 )
+const canConfirm = computed(() => o.value && ['community', 'admin'].includes(store.role))
+const confirmVisible = ref(false)
+const confirmForm = reactive({
+  confirmer_role: 'elder', confirmer_name: '', method: 'phone', confirms_received: true,
+  taste_feedback: '', body_discomfort: false, receipt_dispute: false, note: ''
+})
+function openConfirm() {
+  Object.assign(confirmForm, {
+    confirmer_role: 'elder', confirmer_name: o.value.elder.name, method: 'phone', confirms_received: true,
+    taste_feedback: '', body_discomfort: false, receipt_dispute: false, note: ''
+  })
+  confirmVisible.value = true
+}
+async function doConfirm() {
+  if (!confirmForm.confirmer_name) {
+    ElMessage.warning('请填写回访对象姓名')
+    return
+  }
+  acting.value = true
+  try {
+    await api.post(`/orders/${o.value.id}/elder-confirmation`, confirmForm)
+    ElMessage.success('老人本人/同住人回访已记录')
+    confirmVisible.value = false
+    await load()
+  } finally { acting.value = false }
+}
 
 async function load() {
   loading.value = true

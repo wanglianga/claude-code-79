@@ -29,11 +29,16 @@ func (s *Server) listAnomalies(c *gin.Context) {
 	}
 	rows, err := s.db.Query(`SELECT a.id, a.order_id, COALESCE(o.order_no,''), a.elder_id, COALESCE(e.name,''),
 		a.type, a.priority, a.description, a.status, a.resolution, COALESCE(u.name,''), a.created_at::text, a.resolved_at::text,
-		(SELECT COUNT(*) FROM follow_ups f WHERE f.anomaly_id=a.id), COALESCE(a.home_visit,FALSE), COALESCE(e.no_answer_count,0)
+		(SELECT COUNT(*) FROM follow_ups f WHERE f.anomaly_id=a.id), COALESCE(a.home_visit,FALSE), COALESCE(e.no_answer_count,0),
+		COALESCE(a.responsible_party,''), COALESCE(a.food_safety,FALSE), COALESCE(a.elder_unwell,FALSE),
+		COALESCE(a.investigation,''), COALESCE(a.outcome,''),
+		COALESCE(du.name,'')
 		FROM anomalies a
 		LEFT JOIN orders o ON o.id=a.order_id
 		LEFT JOIN elders e ON e.id=a.elder_id
 		LEFT JOIN users u ON u.id=a.reported_by
+		LEFT JOIN deliveries dd ON dd.order_id=a.order_id
+		LEFT JOIN users du ON du.id=dd.deliverer_id
 		WHERE `+strings.Join(conds, " AND ")+` ORDER BY CASE a.status WHEN 'open' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END, a.priority='normal', a.id DESC LIMIT 200`, args...)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "查询异常工单失败")
@@ -49,9 +54,12 @@ func (s *Server) listAnomalies(c *gin.Context) {
 			status, resolution, reporter, createdAt         string
 			resolvedAt                                      *string
 			homeVisit                                       bool
+			responsible, investigation, outcome, carrier    string
+			foodSafety, elderUnwell                         bool
 		)
 		rows.Scan(&id, &orderID, &orderNo, &elderID, &elderName, &typ, &priority, &desc,
-			&status, &resolution, &reporter, &createdAt, &resolvedAt, &followCount, &homeVisit, &noAnswerCount)
+			&status, &resolution, &reporter, &createdAt, &resolvedAt, &followCount, &homeVisit, &noAnswerCount,
+			&responsible, &foodSafety, &elderUnwell, &investigation, &outcome, &carrier)
 		ra := ""
 		if resolvedAt != nil {
 			ra = *resolvedAt
@@ -62,6 +70,9 @@ func (s *Server) listAnomalies(c *gin.Context) {
 			"status": status, "resolution": resolution, "reported_by": reporter,
 			"created_at": createdAt, "resolved_at": ra, "follow_up_count": followCount,
 			"home_visit": homeVisit, "no_answer_count": noAnswerCount,
+			"responsible_party": responsible, "responsible_party_name": responsiblePartyName(responsible),
+			"food_safety": foodSafety, "elder_unwell": elderUnwell,
+			"investigation": investigation, "outcome": outcome, "carrier": carrier,
 		})
 	}
 	ok(c, list)

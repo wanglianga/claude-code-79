@@ -11,14 +11,14 @@ func (s *Server) computeReconciliation(month string) (gin.H, []gin.H, error) {
 	agg := gin.H{}
 	row := s.db.QueryRow(`SELECT
 		COUNT(*),
-		COUNT(*) FILTER (WHERE status IN ('signed','completed','settled')),
+		COUNT(*) FILTER (WHERE status IN ('signed','completed','settled') AND COALESCE(sign_effectiveness,'valid')<>'invalid'),
 		COUNT(*) FILTER (WHERE status IN ('cancelled','refunded')),
-		COUNT(*) FILTER (WHERE status='exception'),
-		COALESCE(SUM(subsidy_amount) FILTER (WHERE status IN ('signed','completed','settled')),0),
+		COUNT(*) FILTER (WHERE status IN ('exception','verify_pending')),
+		COALESCE(SUM(subsidy_amount) FILTER (WHERE status IN ('signed','completed','settled') AND COALESCE(sign_effectiveness,'valid')<>'invalid'),0),
 		COALESCE(SUM(refund_amount),0),
-		COALESCE(SUM(payable_amount) FILTER (WHERE status IN ('signed','completed','settled')),0),
-		COALESCE(SUM(total_amount) FILTER (WHERE status IN ('signed','completed','settled')),0),
-		COALESCE(SUM(holiday_extra) FILTER (WHERE status IN ('signed','completed','settled')),0)
+		COALESCE(SUM(payable_amount) FILTER (WHERE status IN ('signed','completed','settled') AND COALESCE(sign_effectiveness,'valid')<>'invalid'),0),
+		COALESCE(SUM(total_amount) FILTER (WHERE status IN ('signed','completed','settled') AND COALESCE(sign_effectiveness,'valid')<>'invalid'),0),
+		COALESCE(SUM(holiday_extra) FILTER (WHERE status IN ('signed','completed','settled') AND COALESCE(sign_effectiveness,'valid')<>'invalid'),0)
 		FROM orders WHERE to_char(meal_date,'YYYY-MM')=$1`, month)
 	var total, signed, cancelled, exception int
 	var subsidy, refund, payable, kitchen, hextra float64
@@ -51,9 +51,10 @@ func (s *Server) computeReconciliation(month string) (gin.H, []gin.H, error) {
 	agg["boxes_returned"] = boxesReturned
 	agg["recycle_rate"] = recycleRate
 
-	// 明细：逐单判定是否纳入补贴发放
+	// 明细：逐单判定是否纳入补贴发放（以实际用餐人签收或社区核实结论为准）
 	items := []gin.H{}
-	rows, err := s.db.Query(`SELECT o.id, o.order_no, e.name, o.meal_date::text, o.status, o.total_amount, o.subsidy_amount
+	rows, err := s.db.Query(`SELECT o.id, o.order_no, e.name, o.meal_date::text, o.status, o.total_amount, o.subsidy_amount,
+		COALESCE(o.sign_basis,''), COALESCE(o.sign_effectiveness,'')
 		FROM orders o JOIN elders e ON e.id=o.elder_id
 		WHERE to_char(o.meal_date,'YYYY-MM')=$1 ORDER BY o.meal_date, o.id`, month)
 	if err != nil {
@@ -62,15 +63,25 @@ func (s *Server) computeReconciliation(month string) (gin.H, []gin.H, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var id int
-		var no, elderName, mealDate, status string
+		var no, elderName, mealDate, status, signBasis, signEff string
 		var totalAmt, sub float64
-		rows.Scan(&id, &no, &elderName, &mealDate, &status, &totalAmt, &sub)
+		rows.Scan(&id, &no, &elderName, &mealDate, &status, &totalAmt, &sub, &signBasis, &signEff)
 		included := false
 		reason := ""
 		switch status {
 		case "signed", "completed", "settled":
-			included = true
-			reason = "实际签收，纳入补贴发放"
+			if signEff == "invalid" {
+				reason = "签收经社区核实无效，不发放补贴"
+			} else {
+				included = true
+				basis := signBasisName(signBasis)
+				if signBasis == "" {
+					basis = "骑手送达签收"
+				}
+				reason = "实际用餐人签收/社区核实：" + basis
+			}
+		case "verify_pending":
+			reason = "邻里见证/拍照留证待社区核实，暂不核销"
 		case "cancelled":
 			reason = "已取消，不发放补贴"
 		case "refunded":
@@ -84,7 +95,8 @@ func (s *Server) computeReconciliation(month string) (gin.H, []gin.H, error) {
 		}
 		items = append(items, gin.H{"order_id": id, "order_no": no, "elder_name": elderName,
 			"meal_date": mealDate[:10], "order_status": status, "total_amount": totalAmt,
-			"subsidy_amount": sub, "included": included, "reason": reason})
+			"subsidy_amount": sub, "included": included, "reason": reason,
+			"sign_basis": signBasis, "sign_effectiveness": signEff})
 	}
 	return agg, items, nil
 }
@@ -184,10 +196,11 @@ func (s *Server) createReconciliation(c *gin.Context) {
 	}
 	for _, it := range items {
 		if _, err := tx.Exec(`INSERT INTO reconciliation_items(reconciliation_id, order_id, order_no, elder_name, meal_date,
-			order_status, total_amount, subsidy_amount, included, reason)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+			order_status, total_amount, subsidy_amount, included, reason, sign_basis, sign_effectiveness)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 			recID, it["order_id"], it["order_no"], it["elder_name"], it["meal_date"],
-			it["order_status"], it["total_amount"], it["subsidy_amount"], it["included"], it["reason"]); err != nil {
+			it["order_status"], it["total_amount"], it["subsidy_amount"], it["included"], it["reason"],
+			it["sign_basis"], it["sign_effectiveness"]); err != nil {
 			fail(c, http.StatusInternalServerError, "写入核销明细失败: "+err.Error())
 			return
 		}
@@ -222,19 +235,22 @@ func (s *Server) getReconciliation(c *gin.Context) {
 		return
 	}
 	items := []gin.H{}
-	rows, err := s.db.Query(`SELECT order_id, order_no, elder_name, meal_date::text, order_status, total_amount, subsidy_amount, included, reason
+	rows, err := s.db.Query(`SELECT order_id, order_no, elder_name, meal_date::text, order_status, total_amount, subsidy_amount, included, reason,
+		COALESCE(sign_basis,''), COALESCE(sign_effectiveness,'')
 		FROM reconciliation_items WHERE reconciliation_id=$1 ORDER BY meal_date, order_id`, id)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var oid int
-			var no, elder, mealDate, st, reason string
+			var no, elder, mealDate, st, reason, signBasis, signEff string
 			var totalAmt, sub float64
 			var included bool
-			rows.Scan(&oid, &no, &elder, &mealDate, &st, &totalAmt, &sub, &included, &reason)
+			rows.Scan(&oid, &no, &elder, &mealDate, &st, &totalAmt, &sub, &included, &reason, &signBasis, &signEff)
 			items = append(items, gin.H{"order_id": oid, "order_no": no, "elder_name": elder,
 				"meal_date": mealDate[:10], "order_status": st, "total_amount": totalAmt,
-				"subsidy_amount": sub, "included": included, "reason": reason})
+				"subsidy_amount": sub, "included": included, "reason": reason,
+				"sign_basis": signBasis, "sign_basis_name": signBasisName(signBasis),
+				"sign_effectiveness": signEff})
 		}
 	}
 	ca, aa := "", ""
