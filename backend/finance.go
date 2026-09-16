@@ -77,6 +77,8 @@ func (s *Server) computeReconciliation(month string) (gin.H, []gin.H, error) {
 			reason = "已退餐退款，不发放补贴"
 		case "exception":
 			reason = "异常未办结，暂不发放补贴"
+		case "paused":
+			reason = "住院/转院暂停挂起，补贴冻结，暂停期间不核销"
 		default:
 			reason = "未完成签收，不发放补贴"
 		}

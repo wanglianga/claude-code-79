@@ -9,6 +9,7 @@ RUN npm run build
 # ---------- 阶段 2：后端构建 ----------
 FROM golang:1.25-alpine AS be
 WORKDIR /src
+ENV GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct GOSUMDB=sum.golang.org
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 COPY backend/*.go backend/schema.sql ./

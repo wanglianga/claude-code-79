@@ -113,15 +113,27 @@ func seed(db *sql.DB) error {
 	}
 	dishID := map[string]int{}
 	dishPrice := map[string]float64{}
+	dishCost := map[string]float64{
+		"软烂红烧肉": 7, "清蒸鲈鱼": 6, "番茄炒蛋": 3, "低盐时蔬": 2, "无糖南瓜粥": 1.5,
+		"软米饭": 1, "低糖豆浆": 1, "节日八宝饭": 4,
+	}
 	for _, d := range dishes {
 		var id int
-		if err := tx.QueryRow(`INSERT INTO dishes(name, price, low_salt, low_sugar, softness, nutrition, holiday_only)
-			VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-			d.name, d.price, d.lowSalt, d.lowSugar, d.softness, d.nutrition, d.holidayOnly).Scan(&id); err != nil {
+		if err := tx.QueryRow(`INSERT INTO dishes(name, price, low_salt, low_sugar, softness, nutrition, holiday_only, unit_cost)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+			d.name, d.price, d.lowSalt, d.lowSugar, d.softness, d.nutrition, d.holidayOnly, dishCost[d.name]).Scan(&id); err != nil {
 			return fmt.Errorf("创建菜品 %s 失败: %w", d.name, err)
 		}
 		dishID[d.name] = id
 		dishPrice[d.name] = d.price
+	}
+
+	// 每月补贴可享次数（0=不限次）
+	quotaByName := map[string]int{"张秀英": 30, "李建国": 20, "王桂花": 25, "陈福生": 0}
+	for name, q := range quotaByName {
+		if _, err := tx.Exec(`UPDATE elders SET monthly_quota=$2 WHERE name=$1`, name, q); err != nil {
+			return err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -452,11 +464,221 @@ func seed(db *sql.DB) error {
 		return err
 	}
 
+	// ====================================================================
+	// 状态变更（住院/搬离/去世）四段清算演示数据
+	// ====================================================================
+	insertDemoElder := func(name, idCard, gender, birth, addr, level string, subsidy float64, quota int, active bool, status string) (int, error) {
+		var id int
+		err := db.QueryRow(`INSERT INTO elders(name, id_card, gender, birth_date, phone, address, subsidy_level, subsidy_per_meal,
+			dietary_restrictions, box_return_method, emergency_contact_name, emergency_contact_phone,
+			monthly_quota, active, service_status)
+			VALUES($1,$2,$3,$4::date,'13800000000',$5,$6,$7,'低盐','next_delivery','家属','13800009999',$8,$9,$10) RETURNING id`,
+			name, idCard, gender, birth, addr, level, subsidy, quota, active, status).Scan(&id)
+		return id, err
+	}
+	// 演示批次
+	ensureBatch := func(date, mealType, bstatus string) int {
+		var bid int
+		db.QueryRow(`INSERT INTO kitchen_batches(batch_date, meal_type, batch_no, status, released_at, operator_id)
+			VALUES($1::date,$2,$3,$4, CASE WHEN $4='released' THEN now() ELSE NULL END,$5)
+			ON CONFLICT (batch_date, meal_type) DO UPDATE SET status=EXCLUDED.status RETURNING id`,
+			date, mealType, "B"+replaceDash(date)+"-"+mealType, bstatus, uid["kitchen01"]).Scan(&bid)
+		return bid
+	}
+	type demoItemSpec struct {
+		dish string
+		qty  int
+	}
+	insertDemoOrder := func(elderID int, date, mealType, status, delType string, batchID int, items []demoItemSpec) (int, error) {
+		total, cost := 0.0, 0.0
+		for _, it := range items {
+			total += dishPrice[it.dish] * float64(it.qty)
+			cost += dishCost[it.dish] * float64(it.qty)
+		}
+		subsidy := total
+		if subsidy > 10 {
+			subsidy = 10
+		}
+		payable := total - subsidy
+		var bid interface{}
+		if batchID > 0 {
+			bid = batchID
+		}
+		var oid int
+		err := db.QueryRow(`INSERT INTO orders(order_no, elder_id, created_by, order_source, meal_date, meal_type, delivery_type,
+			address, strict_mode, box_return_method, boxes_issued, total_amount, subsidy_amount, payable_amount, status, batch_id)
+			VALUES('TMP-'||gen_random_uuid(),$1,$2,'community',$3::date,$4,$5,'演示地址',FALSE,'next_delivery',2,$6,$7,$8,$9,$10) RETURNING id`,
+			elderID, uid["community01"], date, mealType, delType, total, subsidy, payable, status, bid).Scan(&oid)
+		if err != nil {
+			return 0, err
+		}
+		db.Exec(`UPDATE orders SET order_no=$1 WHERE id=$2`, orderNo(date, oid), oid)
+		for _, it := range items {
+			db.Exec(`INSERT INTO order_items(order_id, dish_id, dish_name, price, qty) VALUES($1,$2,$3,$4,$5)`,
+				oid, dishID[it.dish], it.dish, dishPrice[it.dish], it.qty)
+		}
+		_ = cost
+		return oid, nil
+	}
+	addDeliveryRaw := func(orderID int, status, pickup, delivered string) {
+		var pu, de interface{}
+		if pickup != "" {
+			pu = pickup
+		}
+		if delivered != "" {
+			de = delivered
+		}
+		db.Exec(`INSERT INTO deliveries(order_id, deliverer_id, deliverer_type, thermal_box_no, status, pickup_time, delivered_time)
+			VALUES($1,$2,'rider','WBX-DEMO',$3,$4,$5) ON CONFLICT (order_id) DO NOTHING`, orderID, uid["rider01"], status, pu, de)
+	}
+	addBoxReturned := func(orderID, elderID int) {
+		db.Exec(`INSERT INTO box_records(order_id, elder_id, boxes_issued, boxes_returned, return_method, status, returned_at)
+			VALUES($1,$2,2,2,'next_delivery','returned',now()) ON CONFLICT (order_id) DO NOTHING`, orderID, elderID)
+	}
+	// 写入状态变更主单 + 四段明细，再回写汇总
+	seedChange := func(elderID int, ctype, effDate, hospital, newAddr string, inCov, retained bool,
+		segOrders map[string][]int, handling map[string]string, kitchenSegs map[string]bool) int {
+		var cid int
+		db.QueryRow(`INSERT INTO elder_status_changes(elder_id, change_type, status, effective_date, hospital,
+			family_contact_name, family_contact_phone, subsidy_retained, new_address, in_coverage,
+			operator_id, family_confirmed_by, family_confirmed_at, note)
+			VALUES($1,$2,'active',$3::date,$4,'家属张强','13800001111',$5,$6,$7,$8,$9,now(),'种子演示数据') RETURNING id`,
+			elderID, ctype, effDate, hospital, retained, newAddr, inCov, uid["community01"],
+			map[string]string{"hospitalization": "家属电话确认", "move_out": "家属现场确认", "death": "家属现场确认"}[ctype]).Scan(&cid)
+		for seg, oids := range segOrders {
+			for _, oid := range oids {
+				var no, md, snap string
+				var qty int
+				var total, sub, pay, mcost float64
+				var bID int
+				db.QueryRow(`SELECT o.order_no, o.meal_date::text, o.status, COALESCE(o.batch_id,0),
+					COALESCE((SELECT SUM(qi.qty) FROM order_items qi WHERE qi.order_id=o.id),1),
+					o.total_amount, o.subsidy_amount, o.payable_amount,
+					COALESCE((SELECT SUM(qi.qty*COALESCE(NULLIF(d.unit_cost,0),qi.price*0.5)) FROM order_items qi LEFT JOIN dishes d ON d.id=qi.dish_id WHERE qi.order_id=o.id),0)
+					FROM orders o WHERE o.id=$1`, oid).
+					Scan(&no, &md, &snap, &bID, &qty, &total, &sub, &pay, &mcost)
+				var picked bool
+				db.QueryRow(`SELECT EXISTS(SELECT 1 FROM deliveries WHERE order_id=$1 AND pickup_time IS NOT NULL)`, oid).Scan(&picked)
+				bno := ""
+				if bID > 0 {
+					db.QueryRow(`SELECT batch_no FROM kitchen_batches WHERE id=$1`, bID).Scan(&bno)
+				}
+				db.Exec(`INSERT INTO status_change_items(change_id, order_id, segment, order_no, meal_date,
+					order_status_snapshot, batch_id, batch_no, picked, qty, total_amount, subsidy_amount, payable_amount,
+					material_cost, handling, transferred, kitchen_responsible)
+					VALUES($1,$2,$3,$4,$5::date,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,FALSE,$16)`,
+					cid, oid, seg, no, md[:10], snap, bID, bno, picked, qty, total, sub, pay, mcost,
+					handling[seg], kitchenSegs[seg])
+			}
+		}
+		// 回写四段汇总
+		db.Exec(`UPDATE elder_status_changes SET
+			seg_signed=(SELECT COUNT(*) FROM status_change_items WHERE change_id=$1 AND segment='signed'),
+			seg_in_transit=(SELECT COUNT(*) FROM status_change_items WHERE change_id=$1 AND segment='in_transit'),
+			seg_prepared=(SELECT COUNT(*) FROM status_change_items WHERE change_id=$1 AND segment='prepared_undelivered'),
+			seg_unprepared=(SELECT COUNT(*) FROM status_change_items WHERE change_id=$1 AND segment='unprepared'),
+			signed_subsidy_total=COALESCE((SELECT SUM(subsidy_amount) FROM status_change_items WHERE change_id=$1 AND segment='signed'),0),
+			transit_subsidy_total=COALESCE((SELECT SUM(subsidy_amount) FROM status_change_items WHERE change_id=$1 AND segment='in_transit'),0),
+			prepared_refund_total=COALESCE((SELECT SUM(payable_amount) FROM status_change_items WHERE change_id=$1 AND segment='prepared_undelivered'),0),
+			prepared_cost_total=COALESCE((SELECT SUM(material_cost) FROM status_change_items WHERE change_id=$1 AND segment='prepared_undelivered'),0),
+			unprepared_cancel_subsidy=COALESCE((SELECT SUM(subsidy_amount) FROM status_change_items WHERE change_id=$1 AND segment='unprepared'),0),
+			kitchen_loss_total=COALESCE((SELECT SUM(material_cost) FROM status_change_items WHERE change_id=$1 AND kitchen_responsible),0)
+			WHERE id=$1`, cid)
+		return cid
+	}
+
+	// —— 演示一：住院暂停（在服暂停，等待出院恢复，四段齐全）——
+	hElder, err := insertDemoElder("孙桂英", "110101194208080061", "女", "1942-08-08",
+		"幸福里小区 8 栋 1 单元 302", "full", 12, 30, true, "paused_hospital")
+	if err != nil {
+		return err
+	}
+	bDinner := ensureBatch(day(0), "dinner", "released")
+	bTodayLunch := ensureBatch(day(0), "lunch", "released")
+	bTomorrowLunch := ensureBatch(day(1), "lunch", "preparing")
+	hSigned, _ := insertDemoOrder(hElder, day(-4), "lunch", "signed", "home", 0,
+		[]demoItemSpec{{"软烂红烧肉", 1}, {"软米饭", 1}})
+	addDeliveryRaw(hSigned, "delivered", day(-4)+" 11:05", day(-4)+" 11:35")
+	addBoxReturned(hSigned, hElder)
+	hTransit, _ := insertDemoOrder(hElder, day(0), "lunch", "paused", "home", bTodayLunch,
+		[]demoItemSpec{{"清蒸鲈鱼", 1}, {"低盐时蔬", 1}, {"软米饭", 1}})
+	db.Exec(`UPDATE orders SET subsidy_frozen=TRUE WHERE id=$1`, hTransit)
+	addDeliveryRaw(hTransit, "picked", day(0)+" 11:08", "")
+	hPrepared, _ := insertDemoOrder(hElder, day(1), "lunch", "paused", "home", bTomorrowLunch,
+		[]demoItemSpec{{"番茄炒蛋", 1}, {"无糖南瓜粥", 1}, {"软米饭", 1}})
+	db.Exec(`UPDATE orders SET subsidy_frozen=TRUE WHERE id=$1`, hPrepared)
+	hUnprep, _ := insertDemoOrder(hElder, day(3), "lunch", "cancelled", "home", 0,
+		[]demoItemSpec{{"软烂红烧肉", 1}, {"软米饭", 1}})
+	seedChange(hElder, "hospitalization", day(0), "市第一人民医院（心内科）", "", true, true,
+		map[string][]int{"signed": {hSigned}, "in_transit": {hTransit}, "prepared_undelivered": {hPrepared}, "unprepared": {hUnprep}},
+		map[string]string{
+			"signed":               "已签收记录保留，补贴正常纳入财政结算",
+			"in_transit":           "骑手已取餐，停止配送并携回；补贴冻结暂不核销，出院后按原异常餐单结清",
+			"prepared_undelivered": "已备餐未出餐，暂停保留，登记批次/数量/成本，可转配其他老人",
+			"unprepared":           "未备餐取消，释放补贴额度，不进财政结算",
+		}, map[string]bool{})
+	db.Exec(`UPDATE elder_status_changes SET expected_discharge_date=$2::date WHERE elder_id=$1 AND change_type='hospitalization'`, hElder, day(14))
+
+	// —— 演示二：搬离服务区域（终止配送、退餐、补贴清算、回收餐盒）——
+	mElder, err := insertDemoElder("吴桂兰", "110101193911200072", "女", "1939-11-20",
+		"临江市滨湖花园 2 栋 601（已搬出原服务区）", "partial", 8, 20, false, "moved_out")
+	if err != nil {
+		return err
+	}
+	mSigned, _ := insertDemoOrder(mElder, day(-2), "lunch", "signed", "home", 0,
+		[]demoItemSpec{{"清蒸鲈鱼", 1}, {"软米饭", 1}})
+	addDeliveryRaw(mSigned, "delivered", day(-2)+" 11:06", day(-2)+" 11:40")
+	addBoxReturned(mSigned, mElder)
+	mPrepared, _ := insertDemoOrder(mElder, day(0), "dinner", "refunded", "home", bDinner,
+		[]demoItemSpec{{"番茄炒蛋", 1}, {"软米饭", 1}})
+	db.Exec(`UPDATE orders SET refund_amount=payable_amount, cancel_reason='搬离服务区，已备餐未送出按退餐处理' WHERE id=$1`, mPrepared)
+	mUnprep, _ := insertDemoOrder(mElder, day(2), "lunch", "cancelled", "home", 0,
+		[]demoItemSpec{{"软烂红烧肉", 1}, {"软米饭", 1}})
+	mcid := seedChange(mElder, "move_out", day(0), "", "临江市滨湖花园 2 栋 601", false, true,
+		map[string][]int{"signed": {mSigned}, "prepared_undelivered": {mPrepared}, "unprepared": {mUnprep}},
+		map[string]string{
+			"signed":               "已签收记录保留，按已用次数清算补贴",
+			"prepared_undelivered": "已备餐未送出按退餐处理，自付退回；登记批次/数量/成本，可转配",
+			"unprepared":           "未备餐取消，未用补贴额度停止核销",
+		}, map[string]bool{})
+	db.Exec(`UPDATE elder_status_changes SET boxes_to_recover=2, boxes_recovered=2 WHERE id=$1`, mcid)
+
+	// —— 演示三：老人去世（停配停核销，保留签收，未出餐不结算，已出餐未送达记食材损耗/厨房责任）——
+	dElder, err := insertDemoElder("刘德海", "110101193605030083", "男", "1936-05-03",
+		"康乐社区 9 号楼 2 单元 403", "full", 12, 30, false, "deceased")
+	if err != nil {
+		return err
+	}
+	bBreak := ensureBatch(day(0), "breakfast", "released")
+	dSigned, _ := insertDemoOrder(dElder, day(-3), "lunch", "signed", "home", 0,
+		[]demoItemSpec{{"软烂红烧肉", 1}, {"低盐时蔬", 1}, {"软米饭", 1}})
+	addDeliveryRaw(dSigned, "delivered", day(-3)+" 11:05", day(-3)+" 11:38")
+	addBoxReturned(dSigned, dElder)
+	dTransit, _ := insertDemoOrder(dElder, day(0), "breakfast", "exception", "home", bBreak,
+		[]demoItemSpec{{"无糖南瓜粥", 1}, {"软米饭", 1}})
+	db.Exec(`UPDATE orders SET subsidy_frozen=TRUE, cancel_reason='老人去世，已出餐未送达，记食材损耗与厨房责任' WHERE id=$1`, dTransit)
+	addDeliveryRaw(dTransit, "failed", day(0)+" 07:20", "")
+	dPrepared, _ := insertDemoOrder(dElder, day(0), "lunch", "refunded", "home", bTodayLunch,
+		[]demoItemSpec{{"清蒸鲈鱼", 1}, {"软米饭", 1}})
+	db.Exec(`UPDATE orders SET refund_amount=payable_amount, cancel_reason='老人去世，已出餐未送达，记食材损耗与厨房责任' WHERE id=$1`, dPrepared)
+	dUnprep, _ := insertDemoOrder(dElder, day(2), "lunch", "cancelled", "home", 0,
+		[]demoItemSpec{{"番茄炒蛋", 1}, {"软米饭", 1}})
+	seedChange(dElder, "death", day(0), "", "", true, false,
+		map[string][]int{"signed": {dSigned}, "in_transit": {dTransit}, "prepared_undelivered": {dPrepared}, "unprepared": {dUnprep}},
+		map[string]string{
+			"signed":               "已签收记录保留，补贴按实际签收正常结算",
+			"in_transit":           "骑手已取餐未送达：停止配送，记食材损耗与厨房责任，餐食可转配，保温箱交回",
+			"prepared_undelivered": "已出餐未送达：不进财政结算，记食材损耗与厨房责任，可转配其他老人",
+			"unprepared":           "未备餐取消，停止配送与补贴核销",
+		}, map[string]bool{"in_transit": true, "prepared_undelivered": true})
+
 	// ---------- 通知 ----------
 	db.Exec(`INSERT INTO notifications(role, title, content) VALUES
 		('kitchen', '今日待备餐', '今日有 4 份已确认餐单等待创建批次备餐'),
 		('community', '餐盒未回收提醒', '张秀英 2 个餐盒未回收，已生成异常工单'),
-		('finance', '本月核销提醒', '本月已有多笔签收餐单，月底请生成核销单')`)
+		('community', '住院暂停四段清算', '孙桂英住院暂停，已按四段拆分餐单，请跟进已备餐转配'),
+		('finance', '本月核销提醒', '本月已有多笔签收餐单，月底请生成核销单'),
+		('finance', '去世清算', '刘德海去世已清算：保留已签收，未出餐不结算，已出餐未送达记食材损耗')`)
 
 	log.Printf("种子数据完成：用户 %d，老人 %d，菜品 %d，上月归档核销 #%d", len(users), len(elders), len(dishes), recID)
 	return nil

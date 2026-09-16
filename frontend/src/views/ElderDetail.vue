@@ -3,8 +3,20 @@
     <template v-if="e">
       <div class="page-card">
         <div class="flex-row" style="justify-content: space-between">
-          <h3 class="page-title" style="margin:0">{{ e.name }} 的档案</h3>
-          <el-button v-if="canSubsidy" type="warning" @click="subsidyVisible = true">补贴资格变更</el-button>
+          <h3 class="page-title" style="margin:0">
+            {{ e.name }} 的档案
+            <el-tag :type="serviceStatusMap[e.service_status||'active']?.type" size="small" effect="dark" style="margin-left:8px">
+              {{ serviceStatusMap[e.service_status||'active']?.text }}
+            </el-tag>
+          </h3>
+          <div class="flex-row">
+            <el-tag v-if="e.monthly_quota>0" type="warning" effect="plain">
+              本月补贴可享 {{ e.monthly_remaining }}/{{ e.monthly_quota }} 次（已用 {{ e.monthly_used }}）
+            </el-tag>
+            <el-tag v-else type="info" effect="plain">补贴次数不限</el-tag>
+            <el-button v-if="canStatusChange" type="danger" plain @click="goStatus">住院/转院/搬离/去世清算</el-button>
+            <el-button v-if="canSubsidy" type="warning" @click="subsidyVisible = true">补贴资格变更</el-button>
+          </div>
         </div>
         <el-descriptions :column="3" border class="mt-12">
           <el-descriptions-item label="身份证号">{{ e.id_card }}</el-descriptions-item>
@@ -110,13 +122,14 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
 import { store } from '../store'
-import { subsidyLevels, boxMethods, orderStatus, fmtTime, fmtMoney } from '../utils'
+import { subsidyLevels, boxMethods, orderStatus, serviceStatusMap, fmtTime, fmtMoney } from '../utils'
 
 const route = useRoute()
+const router = useRouter()
 const e = ref(null)
 const loading = ref(false)
 const acting = ref(false)
@@ -124,6 +137,10 @@ const subsidyVisible = ref(false)
 const subsidyForm = reactive({ new_level: 'partial', new_amount: 0, reason: '' })
 
 const canSubsidy = computed(() => ['community', 'admin', 'finance'].includes(store.role))
+const canStatusChange = computed(() => ['community', 'admin'].includes(store.role) && e.value?.active && e.value?.service_status === 'active')
+function goStatus() {
+  router.push('/status-changes')
+}
 
 async function load() {
   loading.value = true

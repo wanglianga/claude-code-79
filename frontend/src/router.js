@@ -20,6 +20,8 @@ const routes = [
       { path: 'finance', component: () => import('./views/Finance.vue'), meta: { title: '财政核销', roles: ['finance', 'admin'] } },
       { path: 'finance/:id', component: () => import('./views/ReconciliationDetail.vue'), meta: { title: '核销详情', roles: ['finance', 'admin'] } },
       { path: 'subsidy-changes', component: () => import('./views/SubsidyChanges.vue'), meta: { title: '补贴变更记录', roles: ['finance', 'admin', 'community'] } },
+      { path: 'status-changes', component: () => import('./views/StatusChanges.vue'), meta: { title: '状态变更与四段清算' } },
+      { path: 'status-changes/:id', component: () => import('./views/StatusChangeDetail.vue'), meta: { title: '四段清算详情' } },
       { path: 'dishes', component: () => import('./views/Dishes.vue'), meta: { title: '菜品管理', roles: ['kitchen', 'admin'] } },
       { path: 'users', component: () => import('./views/Users.vue'), meta: { title: '用户管理', roles: ['admin'] } }
     ]

@@ -78,6 +78,7 @@ const allMenus = [
   { path: '/kitchen', title: '厨房工作台', icon: 'Food', roles: ['kitchen', 'admin'] },
   { path: '/delivery', title: '配送任务', icon: 'Van', roles: ['rider', 'volunteer'] },
   { path: '/anomalies', title: '异常工单', icon: 'WarningFilled', roles: null },
+  { path: '/status-changes', title: '状态变更清算', icon: 'Switch', roles: null },
   { path: '/boxes', title: '餐盒回收', icon: 'Refresh', roles: ['community', 'admin', 'finance'] },
   { path: '/finance', title: '财政核销', icon: 'Money', roles: ['finance', 'admin'] },
   { path: '/subsidy-changes', title: '补贴变更记录', icon: 'Document', roles: ['finance', 'admin', 'community'] },

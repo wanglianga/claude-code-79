@@ -48,6 +48,15 @@ func main() {
 		auth.PUT("/elders/:id", s.requireRole("admin", "community"), s.updateElder)
 		auth.POST("/elders/:id/subsidy", s.requireRole("admin", "community", "finance"), s.changeSubsidy)
 
+		// 老人状态变更（住院/转院/搬离/去世）按生效日期四段清算
+		auth.GET("/elders/:id/status-preview", s.previewStatusChange)
+		auth.POST("/elders/:id/status-change", s.requireRole("community", "admin"), s.createStatusChange)
+		auth.GET("/status-changes", s.listStatusChanges)
+		auth.GET("/status-changes/:id", s.getStatusChange)
+		auth.POST("/status-changes/:id/resume", s.requireRole("community", "admin"), s.resumeStatusChange)
+		auth.POST("/status-changes/:id/transfer-meal", s.requireRole("kitchen", "community", "admin"), s.transferMeal)
+		auth.POST("/status-changes/:id/recover-boxes", s.requireRole("community", "rider", "admin"), s.recoverBoxes)
+
 		auth.GET("/orders", s.listOrders)
 		auth.POST("/orders", s.requireRole("elder", "family", "community", "admin"), s.createOrder)
 		auth.GET("/orders/:id", s.getOrder)

@@ -98,7 +98,7 @@ func (s *Server) updateDish(c *gin.Context) {
 
 // ---------------- 老人档案 ----------------
 
-func elderRowToMap(row interface{ Scan(...interface{}) error }) (gin.H, error) {
+func elderRowToMap(db *sql.DB, row interface{ Scan(...interface{}) error }) (gin.H, error) {
 	var (
 		e struct {
 			ID, UserID, FamilyUserID                            int
@@ -111,6 +111,8 @@ func elderRowToMap(row interface{ Scan(...interface{}) error }) (gin.H, error) {
 			RiskLevel, DeliveryConfirmMode                      string
 			NoAnswerCount                                       int
 			ElderType, BoxPolicy, DepositStatus                 string
+			ServiceStatus                                       string
+			MonthlyQuota                                        int
 		}
 	)
 	var userID, familyID sql.NullInt64
@@ -119,13 +121,24 @@ func elderRowToMap(row interface{ Scan(...interface{}) error }) (gin.H, error) {
 		&e.SubsidyLevel, &e.SubsidyPerMeal, &e.Dietary, &e.NeedKnock, &e.BoxReturnMethod,
 		&e.EmergName, &e.EmergPhone, &e.Cog, &e.Alone, &e.Mob, &familyID, &e.CommunityNote, &e.Active,
 		&e.RiskLevel, &e.DeliveryConfirmMode, &e.NoAnswerCount, &focusUntil,
-		&e.ElderType, &e.BoxPolicy, &e.DepositStatus)
+		&e.ElderType, &e.BoxPolicy, &e.DepositStatus, &e.ServiceStatus, &e.MonthlyQuota)
 	if err != nil {
 		return nil, err
 	}
 	birth := ""
 	if e.BirthDate.Valid {
 		birth = e.BirthDate.Time.Format("2006-01-02")
+	}
+	monthlyUsed := 0
+	monthlyRemaining := -1 // -1 表示不限次
+	if e.MonthlyQuota > 0 {
+		_ = db.QueryRow(`SELECT COUNT(*) FROM orders WHERE elder_id=$1
+			AND to_char(meal_date,'YYYY-MM')=to_char(CURRENT_DATE,'YYYY-MM')
+			AND status IN ('signed','completed','settled') AND subsidy_amount>0`, e.ID).Scan(&monthlyUsed)
+		monthlyRemaining = e.MonthlyQuota - monthlyUsed
+		if monthlyRemaining < 0 {
+			monthlyRemaining = 0
+		}
 	}
 	m := gin.H{
 		"id": e.ID, "name": e.Name, "id_card": e.IDCard, "gender": e.Gender, "birth_date": birth,
@@ -139,6 +152,8 @@ func elderRowToMap(row interface{ Scan(...interface{}) error }) (gin.H, error) {
 		"risk_level": e.RiskLevel, "delivery_confirm_mode": e.DeliveryConfirmMode,
 		"no_answer_count": e.NoAnswerCount, "focus_until": focusUntil.String,
 		"elder_type": e.ElderType, "box_policy": e.BoxPolicy, "deposit_status": e.DepositStatus,
+		"service_status": e.ServiceStatus, "monthly_quota": e.MonthlyQuota,
+		"monthly_used": monthlyUsed, "monthly_remaining": monthlyRemaining,
 	}
 	if userID.Valid {
 		m["user_id"] = userID.Int64
@@ -153,7 +168,7 @@ const elderCols = `id, user_id, name, id_card, gender, birth_date, phone, addres
 	dietary_restrictions, need_knock_confirm, box_return_method, emergency_contact_name, emergency_contact_phone,
 	cognitive_impairment, living_alone, mobility_impaired, family_user_id, community_note, active,
 	risk_level, delivery_confirm_mode, no_answer_count, focus_until::text,
-	elder_type, box_policy, deposit_status`
+	elder_type, box_policy, deposit_status, COALESCE(service_status,'active'), COALESCE(monthly_quota,0)`
 
 func (s *Server) listElders(c *gin.Context) {
 	q := strings.TrimSpace(c.Query("q"))
@@ -180,7 +195,7 @@ func (s *Server) listElders(c *gin.Context) {
 	defer rows.Close()
 	list := []gin.H{}
 	for rows.Next() {
-		m, err := elderRowToMap(rows)
+		m, err := elderRowToMap(s.db, rows)
 		if err == nil {
 			list = append(list, m)
 		}
@@ -190,7 +205,7 @@ func (s *Server) listElders(c *gin.Context) {
 
 func (s *Server) getElder(c *gin.Context) {
 	id := c.Param("id")
-	m, err := elderRowToMap(s.db.QueryRow(`SELECT `+elderCols+` FROM elders WHERE id=$1`, id))
+	m, err := elderRowToMap(s.db, s.db.QueryRow(`SELECT `+elderCols+` FROM elders WHERE id=$1`, id))
 	if err != nil {
 		fail(c, http.StatusNotFound, "老人档案不存在")
 		return
@@ -250,6 +265,7 @@ type elderReq struct {
 	MobilityImpaired     bool    `json:"mobility_impaired"`
 	DeliveryConfirmMode  string  `json:"delivery_confirm_mode"`
 	ElderType            string  `json:"elder_type"`
+	MonthlyQuota         int     `json:"monthly_quota"`
 	FamilyUserID         *int    `json:"family_user_id"`
 	CommunityNote        string  `json:"community_note"`
 }
@@ -282,11 +298,11 @@ func (s *Server) createElder(c *gin.Context) {
 	var id int
 	err := s.db.QueryRow(`INSERT INTO elders(name, id_card, gender, birth_date, phone, address, subsidy_level, subsidy_per_meal,
 		dietary_restrictions, need_knock_confirm, box_return_method, emergency_contact_name, emergency_contact_phone,
-		cognitive_impairment, living_alone, mobility_impaired, family_user_id, community_note, delivery_confirm_mode, elder_type)
-		VALUES($1,$2,$3,NULLIF($4,'')::date,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id`,
+		cognitive_impairment, living_alone, mobility_impaired, family_user_id, community_note, delivery_confirm_mode, elder_type, monthly_quota)
+		VALUES($1,$2,$3,NULLIF($4,'')::date,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING id`,
 		req.Name, req.IDCard, req.Gender, req.BirthDate, req.Phone, req.Address, req.SubsidyLevel, req.SubsidyPerMeal,
 		req.DietaryRestrictions, req.NeedKnockConfirm, req.BoxReturnMethod, req.EmergencyContactName, req.EmergencyContactPhone,
-		req.CognitiveImpairment, req.LivingAlone, req.MobilityImpaired, req.FamilyUserID, req.CommunityNote, req.DeliveryConfirmMode, req.ElderType).Scan(&id)
+		req.CognitiveImpairment, req.LivingAlone, req.MobilityImpaired, req.FamilyUserID, req.CommunityNote, req.DeliveryConfirmMode, req.ElderType, req.MonthlyQuota).Scan(&id)
 	if err != nil {
 		fail(c, http.StatusBadRequest, "建档失败：身份证号可能已存在")
 		return
@@ -304,11 +320,11 @@ func (s *Server) updateElder(c *gin.Context) {
 	req.normalize()
 	_, err := s.db.Exec(`UPDATE elders SET name=$1, id_card=$2, gender=$3, birth_date=NULLIF($4,'')::date, phone=$5, address=$6,
 		dietary_restrictions=$7, need_knock_confirm=$8, box_return_method=$9, emergency_contact_name=$10, emergency_contact_phone=$11,
-		cognitive_impairment=$12, living_alone=$13, mobility_impaired=$14, family_user_id=$15, community_note=$16, delivery_confirm_mode=$17, elder_type=$18
+		cognitive_impairment=$12, living_alone=$13, mobility_impaired=$14, family_user_id=$15, community_note=$16, delivery_confirm_mode=$17, elder_type=$18, monthly_quota=$20
 		WHERE id=$19`,
 		req.Name, req.IDCard, req.Gender, req.BirthDate, req.Phone, req.Address,
 		req.DietaryRestrictions, req.NeedKnockConfirm, req.BoxReturnMethod, req.EmergencyContactName, req.EmergencyContactPhone,
-		req.CognitiveImpairment, req.LivingAlone, req.MobilityImpaired, req.FamilyUserID, req.CommunityNote, req.DeliveryConfirmMode, req.ElderType, id)
+		req.CognitiveImpairment, req.LivingAlone, req.MobilityImpaired, req.FamilyUserID, req.CommunityNote, req.DeliveryConfirmMode, req.ElderType, id, req.MonthlyQuota)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "更新档案失败")
 		return

@@ -125,20 +125,49 @@ func (s *Server) createOrder(c *gin.Context) {
 	defer tx.Rollback()
 
 	var (
-		elderName, address, boxMethod, boxPolicy string
+		elderName, address, boxMethod, boxPolicy, serviceStatus string
 		subsidyPerMeal                           float64
 		needKnock, cog, alone, mob               bool
 		active                                   bool
+		monthlyQuota                             int
 		familyID                                 sql.NullInt64
 		elderUserID                              sql.NullInt64
 	)
 	err = tx.QueryRow(`SELECT name, address, box_return_method, subsidy_per_meal, need_knock_confirm,
-		cognitive_impairment, living_alone, mobility_impaired, active, family_user_id, user_id, box_policy
+		cognitive_impairment, living_alone, mobility_impaired, active, family_user_id, user_id, box_policy,
+		COALESCE(service_status,'active'), COALESCE(monthly_quota,0)
 		FROM elders WHERE id=$1`, req.ElderID).
-		Scan(&elderName, &address, &boxMethod, &subsidyPerMeal, &needKnock, &cog, &alone, &mob, &active, &familyID, &elderUserID, &boxPolicy)
+		Scan(&elderName, &address, &boxMethod, &subsidyPerMeal, &needKnock, &cog, &alone, &mob, &active, &familyID, &elderUserID, &boxPolicy,
+			&serviceStatus, &monthlyQuota)
 	if err != nil || !active {
 		fail(c, http.StatusBadRequest, "老人档案不存在或已停用")
 		return
+	}
+	// 状态变更联动：住院/转院暂停、搬离出区、去世的老人不得继续下单
+	switch serviceStatus {
+	case "paused_hospital":
+		fail(c, http.StatusBadRequest, "老人住院/转院暂停供餐，出院恢复并重新核验后方可下单")
+		return
+	case "moved_out":
+		fail(c, http.StatusBadRequest, "老人已搬离服务区域，已停止配送")
+		return
+	case "deceased":
+		fail(c, http.StatusBadRequest, "老人已去世，配送与补贴核销均已停止")
+		return
+	}
+	// 当月补贴可享次数：超出剩余次数的餐单不再发放补贴（避免暂停期间被重复核销后超额）
+	if monthlyQuota > 0 && subsidyPerMeal > 0 {
+		var usedQuota int
+		month := req.MealDate
+		if len(month) >= 7 {
+			month = month[:7]
+		}
+		tx.QueryRow(`SELECT COUNT(*) FROM orders WHERE elder_id=$1 AND to_char(meal_date,'YYYY-MM')=$2
+			AND status IN ('signed','completed','settled') AND subsidy_amount>0`, req.ElderID, month).Scan(&usedQuota)
+		if usedQuota >= monthlyQuota {
+			fail(c, http.StatusBadRequest, "本月补贴可享次数（"+itoa(monthlyQuota)+" 次）已用完，无法再下补贴餐单")
+			return
+		}
 	}
 	// 家属只能为绑定老人下单；老人只能为自己下单
 	if role == "family" && (!familyID.Valid || int(familyID.Int64) != uid) {

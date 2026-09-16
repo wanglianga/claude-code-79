@@ -10,7 +10,8 @@ export const orderStatus = {
   exception: { text: '异常处理中', type: 'danger' },
   cancelled: { text: '已取消', type: 'info' },
   refunded: { text: '已退餐退款', type: 'info' },
-  settled: { text: '已核销', type: 'success' }
+  settled: { text: '已核销', type: 'success' },
+  paused: { text: '暂停挂起', type: 'warning' }
 }
 
 export const mealTypes = { breakfast: '早餐', lunch: '午餐', dinner: '晚餐' }
@@ -91,6 +92,34 @@ export const elderStatusMap = {
   fine: { text: '安好', type: 'success' },
   need_help: { text: '需要协助', type: 'warning' },
   urgent: { text: '紧急', type: 'danger' }
+}
+
+export const changeTypeMap = {
+  hospitalization: { text: '住院暂停', type: 'warning' },
+  transfer: { text: '转院', type: 'warning' },
+  move_out: { text: '搬离', type: 'danger' },
+  death: { text: '去世', type: 'info' },
+  resume: { text: '出院恢复', type: 'success' }
+}
+
+export const changeStatusMap = {
+  active: { text: '暂停/处理中', type: 'warning' },
+  resumed: { text: '已出院恢复', type: 'success' },
+  closed: { text: '已关闭', type: 'info' }
+}
+
+export const serviceStatusMap = {
+  active: { text: '在服', type: 'success' },
+  paused_hospital: { text: '住院暂停', type: 'warning' },
+  moved_out: { text: '已搬离服务区', type: 'danger' },
+  deceased: { text: '已故', type: 'info' }
+}
+
+export const segmentMap = {
+  signed: { text: '① 已签收', type: 'success' },
+  in_transit: { text: '② 在途（骑手已取餐）', type: 'warning' },
+  prepared_undelivered: { text: '③ 已备餐未出餐', type: 'warning' },
+  unprepared: { text: '④ 未备餐', type: 'info' }
 }
 
 export function fmtTime(t) {

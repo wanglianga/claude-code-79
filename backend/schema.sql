@@ -338,3 +338,102 @@ CREATE INDEX IF NOT EXISTS idx_anomalies_status ON anomalies(status);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read);
 CREATE INDEX IF NOT EXISTS idx_notifications_role ON notifications(role, read);
 CREATE INDEX IF NOT EXISTS idx_box_records_status ON box_records(status);
+
+-- ====================================================================
+-- 老人状态变更（住院/转院/搬离/去世）与按生效日期四段清算
+-- ====================================================================
+
+-- 老人每月补贴可享次数（0 表示不限次）；服务状态（在服/住院暂停/搬离/去世）
+ALTER TABLE elders ADD COLUMN IF NOT EXISTS monthly_quota INT NOT NULL DEFAULT 0;
+ALTER TABLE elders ADD COLUMN IF NOT EXISTS service_status TEXT NOT NULL DEFAULT 'active'
+    CHECK (service_status IN ('active','paused_hospital','moved_out','deceased'));
+-- 菜品食材成本（元/份），用于已备餐/已出餐未送达的食材损耗核算
+ALTER TABLE dishes ADD COLUMN IF NOT EXISTS unit_cost NUMERIC(10,2) NOT NULL DEFAULT 0;
+
+-- 餐单状态补充：paused 住院/转院暂停（暂停期间不得核销补贴）
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
+ALTER TABLE orders ADD CONSTRAINT orders_status_check CHECK (status IN
+    ('pending','confirmed','preparing','ready','delivering','signed','completed','exception',
+     'cancelled','refunded','settled','paused'));
+
+-- 老人状态变更主表：登记 生效日期/经办人/家属确认，驱动四段拆分与各方清算
+CREATE TABLE IF NOT EXISTS elder_status_changes (
+    id                       SERIAL PRIMARY KEY,
+    elder_id                 INT NOT NULL REFERENCES elders(id),
+    change_type              TEXT NOT NULL CHECK (change_type IN ('hospitalization','transfer','move_out','death','resume')),
+    status                   TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','resumed','closed')),
+    effective_date           DATE NOT NULL,
+    -- 住院/转院登记信息
+    hospital                 TEXT NOT NULL DEFAULT '',          -- 住院医院
+    expected_discharge_date  DATE,                               -- 预计出院日
+    family_contact_name      TEXT NOT NULL DEFAULT '',          -- 家属联系人
+    family_contact_phone     TEXT NOT NULL DEFAULT '',
+    subsidy_retained         BOOLEAN NOT NULL DEFAULT TRUE,     -- 补贴资格是否保留
+    transfer_hospital        TEXT NOT NULL DEFAULT '',          -- 转入医院（转院）
+    -- 搬离信息
+    new_address              TEXT NOT NULL DEFAULT '',
+    in_coverage              BOOLEAN NOT NULL DEFAULT TRUE,     -- 新地址是否在覆盖范围
+    boxes_to_recover         INT NOT NULL DEFAULT 0,            -- 应回收餐盒/保温箱
+    boxes_recovered          INT NOT NULL DEFAULT 0,
+    -- 去世
+    death_date               DATE,
+    -- 出院恢复时重新核验四要素
+    reverify_address         TEXT NOT NULL DEFAULT '',          -- 重新核验送餐地址
+    reverify_dietary         TEXT NOT NULL DEFAULT '',          -- 饮食禁忌
+    reverify_subsidy_level   TEXT NOT NULL DEFAULT '',          -- 补贴资格
+    reverify_subsidy_amount  NUMERIC(10,2) NOT NULL DEFAULT 0,
+    reverify_emergency_name  TEXT NOT NULL DEFAULT '',          -- 紧急联系人
+    reverify_emergency_phone TEXT NOT NULL DEFAULT '',
+    remaining_quota          INT NOT NULL DEFAULT 0,            -- 重算后当月剩余可享次数
+    -- 四段清算汇总
+    seg_signed               INT NOT NULL DEFAULT 0,
+    seg_in_transit           INT NOT NULL DEFAULT 0,
+    seg_prepared             INT NOT NULL DEFAULT 0,
+    seg_unprepared           INT NOT NULL DEFAULT 0,
+    signed_subsidy_total     NUMERIC(12,2) NOT NULL DEFAULT 0,  -- 已签收：保留，正常财政结算
+    transit_subsidy_total    NUMERIC(12,2) NOT NULL DEFAULT 0,  -- 在途：暂停挂起，暂不核销
+    prepared_refund_total    NUMERIC(12,2) NOT NULL DEFAULT 0,  -- 已备餐未出餐：退餐金额
+    prepared_cost_total      NUMERIC(12,2) NOT NULL DEFAULT 0,  -- 已备餐批次食材成本
+    unprepared_cancel_subsidy NUMERIC(12,2) NOT NULL DEFAULT 0, -- 未备餐：取消释放的补贴额度
+    kitchen_loss_total       NUMERIC(12,2) NOT NULL DEFAULT 0,  -- 已出餐未送达食材损耗（厨房责任）
+    transferred_qty          INT NOT NULL DEFAULT 0,            -- 已出餐可转配份数
+    operator_id              INT REFERENCES users(id),          -- 经办人
+    family_confirmed_by      TEXT NOT NULL DEFAULT '',          -- 家属确认人
+    family_confirmed_at      TIMESTAMPTZ,
+    note                     TEXT NOT NULL DEFAULT '',
+    parent_change_id         INT REFERENCES elder_status_changes(id), -- 出院恢复单关联的暂停单
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resumed_at               TIMESTAMPTZ
+);
+
+-- 四段清算明细：每一单归入哪一段、批次/数量/成本/转配与处理方式
+CREATE TABLE IF NOT EXISTS status_change_items (
+    id                   SERIAL PRIMARY KEY,
+    change_id            INT NOT NULL REFERENCES elder_status_changes(id) ON DELETE CASCADE,
+    order_id             INT NOT NULL REFERENCES orders(id),
+    segment              TEXT NOT NULL CHECK (segment IN ('signed','in_transit','prepared_undelivered','unprepared')),
+    order_no             TEXT NOT NULL,
+    meal_date            DATE NOT NULL,
+    order_status_snapshot TEXT NOT NULL,
+    batch_id             INT,
+    batch_no             TEXT NOT NULL DEFAULT '',
+    picked               BOOLEAN NOT NULL DEFAULT FALSE,        -- 骑手是否已取餐
+    qty                  INT NOT NULL DEFAULT 1,                -- 本单份数
+    total_amount         NUMERIC(10,2) NOT NULL DEFAULT 0,
+    subsidy_amount       NUMERIC(10,2) NOT NULL DEFAULT 0,
+    payable_amount       NUMERIC(10,2) NOT NULL DEFAULT 0,
+    material_cost        NUMERIC(10,2) NOT NULL DEFAULT 0,      -- 食材成本
+    handling             TEXT NOT NULL DEFAULT '',              -- 处理方式说明
+    transferred          BOOLEAN NOT NULL DEFAULT FALSE,        -- 是否转配给其他老人
+    kitchen_responsible  BOOLEAN NOT NULL DEFAULT FALSE,        -- 是否记厨房责任（损耗）
+    note                 TEXT NOT NULL DEFAULT '',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_status_changes_elder ON elder_status_changes(elder_id);
+CREATE INDEX IF NOT EXISTS idx_status_changes_type ON elder_status_changes(change_type, status);
+CREATE INDEX IF NOT EXISTS idx_status_change_items_change ON status_change_items(change_id);
+CREATE INDEX IF NOT EXISTS idx_status_change_items_order ON status_change_items(order_id);
+
+-- 在途餐单补贴冻结：住院/转院暂停或终止时，骑手已取餐未签收的餐单暂不核销，待异常办结（签收/退餐）后处理
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS subsidy_frozen BOOLEAN NOT NULL DEFAULT FALSE;
